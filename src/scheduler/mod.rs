@@ -12,8 +12,15 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
 
-/// Node execution status. Five states with wire-format compatibility to existing strings.
-/// Copy semantics avoid clones per transition (audit P1-5).
+/// Node execution status: five states. Copy semantics avoid clones per
+/// transition (audit P1-5).
+///
+/// Wire format: bincode encodes this as a u32 variant index, not as the
+/// variant name -- `#[serde(rename_all = "PascalCase")]` governs field/variant
+/// *names*, and bincode never emits names, so it has no effect on this type's
+/// on-disk bytes. A pre-spec-34 vault, which stored `state` as a plain
+/// `String`, is therefore **not** wire-compatible with this enum by itself;
+/// `RedbStore::open` migrates such vaults on open (spec-36).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub enum NodeStatus {
@@ -25,8 +32,11 @@ pub enum NodeStatus {
 }
 
 impl NodeStatus {
-    /// Parse a status string (for deserialization from legacy data).
-    /// Returns an error if the string is not recognized.
+    /// Parse a status string. Used by the v1 -> v2 vault migration
+    /// (`store::legacy::NodeRecordV1::migrate`, spec-36) to convert a legacy
+    /// vault's `state: String` into this enum. Returns an error if the
+    /// string is not recognized -- callers must not default an unrecognised
+    /// status, since that would fabricate a resumable state.
     pub fn parse(s: &str) -> Result<Self, String> {
         match s {
             "Pending" => Ok(NodeStatus::Pending),

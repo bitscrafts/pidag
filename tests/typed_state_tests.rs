@@ -67,7 +67,18 @@ async fn test_legacy_vault_still_loads() {
     // - beta: Failed
     // - gamma: Blocked
 
-    let store = RedbStore::open(&db_path).expect("RedbStore::open");
+    // Open a *copy*, never the fixture itself. `RedbStore::open` is read-write,
+    // so redb writes back to whatever it is handed -- pointing it at the
+    // committed fixture left `legacy.redb` dirty in git after every test run.
+    // The fixture is the wire-compatibility guard: it only proves anything so
+    // long as it stays byte-identical to what the pre-change build wrote.
+    let work_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("_tmp/legacy_vault_copy");
+    let _ = std::fs::remove_dir_all(&work_dir);
+    std::fs::create_dir_all(&work_dir).expect("create work dir");
+    let work_path = work_dir.join("legacy.redb");
+    std::fs::copy(&db_path, &work_path).expect("copy legacy fixture");
+
+    let store = RedbStore::open(&work_path).expect("RedbStore::open");
 
     // Load the run
     let run = store.get_run("legacy1").await.expect("get_run");

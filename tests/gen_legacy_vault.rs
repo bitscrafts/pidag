@@ -4,7 +4,18 @@
 use pidag::store::{NodeRecord, NodeStatus, RedbStore, RunMeta, Store};
 use std::path::PathBuf;
 
+/// IGNORED ON PURPOSE -- run only via `cargo test --test gen_legacy_vault -- --ignored`.
+///
+/// Without this attribute the generator ran on every `cargo test` and rewrote
+/// the fixture using the *current* build, which `test_legacy_vault_still_loads`
+/// then read back with that same build. The compatibility guard was circular:
+/// it could not fail, no matter how the wire format changed. That is exactly
+/// what happened -- the spec-34 refactor commit carried a regenerated fixture,
+/// so the guard proved nothing from the moment the change it guards landed.
+/// The committed fixture must only ever be produced by a build that predates
+/// the change under test.
 #[tokio::test]
+#[ignore]
 async fn gen_legacy_vault_fixture() {
     let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/legacy_vault");
 

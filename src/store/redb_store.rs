@@ -1,3 +1,4 @@
+use super::legacy::{EventV1, NodeRecordV1};
 use super::{NodeRecord, NodeStatus, NodeTiming, RunMeta, Store};
 use crate::core::error::PidagError;
 use crate::core::event::Event;
@@ -17,6 +18,16 @@ const NODE_TIMING_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("no
 // O(1) per-run event sequence counter (P0-2 fix; see HANDOFF 2026-08-02).
 // Keyed by run_id; the stored u64 (BE) is the NEXT seq number to assign.
 const SEQ_TABLE: TableDefinition<&str, &[u8; 8]> = TableDefinition::new("event_seq");
+// spec-36: explicit vault schema version. Keyed by a single constant key;
+// value is a bincode-encoded u32. Absence of this table, or absence of the
+// key within it, means "version 1" -- nothing stamped a version before this
+// spec, so that is the only way to recognise a pre-existing vault.
+const META_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
+const SCHEMA_VERSION_KEY: &str = "schema_version";
+/// Current on-disk vault schema version. `RedbStore::open` migrates any vault
+/// found below this version, and refuses to open one above it (a newer pidag
+/// wrote it; guessing at the shape would corrupt it).
+const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 /// `RedbStore` persists pidag runs to an embedded redb database.
 /// Schema:
@@ -57,36 +68,209 @@ impl RedbStore {
         // `Database`, and the default already matches what we want). Throughput
         // cost is irrelevant for pidag's ~1-event-per-node workload.
 
-        // Create tables if they don't exist
-        {
-            let write_txn = db
-                .begin_write()
-                .map_err(|e| PidagError::Store(format!("Transaction failed: {}", e)))?;
-            let _ = write_txn
-                .open_table(RUNS_TABLE)
-                .map_err(|e| PidagError::Store(format!("Failed to open runs table: {}", e)))?;
-            let _ = write_txn
-                .open_table(NODES_TABLE)
-                .map_err(|e| PidagError::Store(format!("Failed to open nodes table: {}", e)))?;
-            let _ = write_txn
-                .open_table(EVENTS_TABLE)
-                .map_err(|e| PidagError::Store(format!("Failed to open events table: {}", e)))?;
-            let _ = write_txn
-                .open_table(ARTIFACTS_TABLE)
-                .map_err(|e| PidagError::Store(format!("Failed to open artifacts table: {}", e)))?;
-            let _ = write_txn
-                .open_table(SEQ_TABLE)
-                .map_err(|e| PidagError::Store(format!("Failed to open seq table: {}", e)))?;
-            let _ = write_txn.open_table(NODE_TIMING_TABLE).map_err(|e| {
-                PidagError::Store(format!("Failed to open node_timings table: {}", e))
-            })?;
-            write_txn
-                .commit()
-                .map_err(|e| PidagError::Store(format!("Commit failed: {}", e)))?;
+        // spec-36 V3: detect the schema version via a READ transaction first.
+        // Detection must not itself write anything -- a version-2 vault has to
+        // open with zero writes (V3b), and a too-new vault has to be rejected
+        // with zero writes too (V3c).
+        match read_schema_version(&db)? {
+            v if v == CURRENT_SCHEMA_VERSION => {
+                // Already current: open with no write (V3b). Every table was
+                // created either by the migration below (on some earlier
+                // open) or, for a vault that has always been v2, by that
+                // same migration path the first time it was ever opened --
+                // so nothing further needs to be ensured here.
+            }
+            v if v < CURRENT_SCHEMA_VERSION => {
+                // Absent meta table / absent key both read back as 1 (V2).
+                // This also covers a brand-new, completely empty database:
+                // it has no tables at all yet, which is likewise "absent",
+                // and the migration below both creates the base tables and
+                // stamps version 2 -- satisfying V1 for fresh vaults too.
+                migrate_v1_to_v2(&db, path)?;
+            }
+            v => {
+                // V3: an unknown version greater than current is a hard
+                // error naming both versions -- a newer pidag wrote this
+                // vault, and guessing at the shape would corrupt it.
+                return Err(PidagError::Store(format!(
+                    "vault schema error: {} was written with schema version {}, but this build \
+                     of pidag only supports up to version {} -- upgrade pidag to open it",
+                    path.display(),
+                    v,
+                    CURRENT_SCHEMA_VERSION
+                )));
+            }
         }
 
         Ok(Self { db: Arc::new(db) })
     }
+}
+
+/// Read the vault's schema version via a read-only transaction. No meta
+/// table, or a meta table with no `schema_version` key, means version 1
+/// (spec-36 V2) -- nothing stamped a version before this spec, so absence is
+/// the only signal an existing (or brand-new) vault gives us.
+fn read_schema_version(db: &Database) -> Result<u32, PidagError> {
+    let read_txn = db
+        .begin_read()
+        .map_err(|e| PidagError::Store(format!("Transaction failed: {}", e)))?;
+    let meta = match read_txn.open_table(META_TABLE) {
+        Ok(t) => t,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(1),
+        Err(e) => {
+            return Err(PidagError::Store(format!(
+                "Failed to open meta table: {}",
+                e
+            )));
+        }
+    };
+    match meta
+        .get(SCHEMA_VERSION_KEY)
+        .map_err(|e| PidagError::Store(format!("Get failed: {}", e)))?
+    {
+        Some(access) => {
+            let bytes = access.value().to_vec();
+            let version: u32 = bincode::deserialize(&bytes).map_err(|e| {
+                PidagError::Store(format!(
+                    "Vault migration error: failed to read schema_version: {}",
+                    e
+                ))
+            })?;
+            Ok(version)
+        }
+        None => Ok(1),
+    }
+}
+
+/// Migrate a version-1 vault to version 2 (spec-36 V3/V4/V5/V6). Converts
+/// every `nodes` record (`NodeRecordV1` -> `NodeRecord`, via
+/// `NodeStatus::parse`) and every `events` record (`EventV1` -> `Event`,
+/// same key so sequence numbers and ordering are byte-for-byte preserved),
+/// then stamps `schema_version = 2`. Also ensures every base table exists,
+/// so this same path handles a brand-new vault (V1).
+///
+/// V4: all of this happens in a SINGLE write transaction. If anything fails
+/// before `commit()` is reached, the `?` returns out of this function with
+/// the `WriteTransaction` still uncommitted; redb aborts an uncommitted
+/// transaction on drop, so nothing here is ever partially applied -- the
+/// vault is left exactly as it was, still openable and still readable as
+/// version 1.
+fn migrate_v1_to_v2(db: &Database, path: &Path) -> Result<(), PidagError> {
+    let write_txn = db
+        .begin_write()
+        .map_err(|e| PidagError::Store(format!("Transaction failed: {}", e)))?;
+    {
+        // Ensure every base table exists (idempotent; also what a brand-new
+        // vault needs, since it has none of these yet).
+        let _ = write_txn
+            .open_table(RUNS_TABLE)
+            .map_err(|e| PidagError::Store(format!("Failed to open runs table: {}", e)))?;
+        let mut nodes = write_txn
+            .open_table(NODES_TABLE)
+            .map_err(|e| PidagError::Store(format!("Failed to open nodes table: {}", e)))?;
+        let mut events = write_txn
+            .open_table(EVENTS_TABLE)
+            .map_err(|e| PidagError::Store(format!("Failed to open events table: {}", e)))?;
+        let _ = write_txn
+            .open_table(ARTIFACTS_TABLE)
+            .map_err(|e| PidagError::Store(format!("Failed to open artifacts table: {}", e)))?;
+        let _ = write_txn
+            .open_table(SEQ_TABLE)
+            .map_err(|e| PidagError::Store(format!("Failed to open seq table: {}", e)))?;
+        let _ = write_txn
+            .open_table(NODE_TIMING_TABLE)
+            .map_err(|e| PidagError::Store(format!("Failed to open node_timings table: {}", e)))?;
+
+        // V5: nodes table, NodeRecordV1 -> NodeRecord. Read every entry out
+        // first (owned copies), THEN write the converted records back --
+        // `nodes` cannot be borrowed both by a live range/iter and by
+        // `insert` at the same time.
+        let node_entries: Vec<(String, Vec<u8>)> = {
+            let iter = nodes
+                .iter()
+                .map_err(|e| PidagError::Store(format!("Range iteration failed: {}", e)))?;
+            let mut collected = Vec::new();
+            for entry in iter {
+                let (k, v) =
+                    entry.map_err(|e| PidagError::Store(format!("Entry read failed: {}", e)))?;
+                collected.push((k.value().to_string(), v.value().to_vec()));
+            }
+            collected
+        };
+        for (key, bytes) in node_entries {
+            let (run_id, node_id) = key.split_once('\u{0}').unwrap_or(("?", key.as_str()));
+            let v1: NodeRecordV1 = bincode::deserialize(&bytes).map_err(|e| {
+                PidagError::Store(format!(
+                    "Vault migration failed for {} (run {:?}, node {:?}): record is not valid \
+                     v1 data: {}",
+                    path.display(),
+                    run_id,
+                    node_id,
+                    e
+                ))
+            })?;
+            let migrated = v1.migrate().map_err(|msg| {
+                PidagError::Store(format!(
+                    "Vault migration failed for {} (run {:?}): {}",
+                    path.display(),
+                    run_id,
+                    msg
+                ))
+            })?;
+            let reencoded = bincode::serialize(&migrated)
+                .map_err(|e| PidagError::Store(format!("Serialization failed: {}", e)))?;
+            nodes
+                .insert(key.as_str(), reencoded.as_slice())
+                .map_err(|e| PidagError::Store(format!("Insert failed: {}", e)))?;
+        }
+
+        // V6: events table, EventV1 -> Event. Same read-then-write shape;
+        // keys (and therefore sequence numbers / ordering) are untouched --
+        // only the value bytes for each existing key are replaced.
+        let event_entries: Vec<(String, Vec<u8>)> = {
+            let iter = events
+                .iter()
+                .map_err(|e| PidagError::Store(format!("Range iteration failed: {}", e)))?;
+            let mut collected = Vec::new();
+            for entry in iter {
+                let (k, v) =
+                    entry.map_err(|e| PidagError::Store(format!("Entry read failed: {}", e)))?;
+                collected.push((k.value().to_string(), v.value().to_vec()));
+            }
+            collected
+        };
+        for (key, bytes) in event_entries {
+            let v1: EventV1 = bincode::deserialize(&bytes).map_err(|e| {
+                PidagError::Store(format!(
+                    "Vault migration failed for {} (event {:?}): record is not valid v1 data: {}",
+                    path.display(),
+                    key,
+                    e
+                ))
+            })?;
+            let migrated = v1.migrate();
+            let reencoded = bincode::serialize(&migrated)
+                .map_err(|e| PidagError::Store(format!("Serialization failed: {}", e)))?;
+            events
+                .insert(key.as_str(), reencoded.as_slice())
+                .map_err(|e| PidagError::Store(format!("Insert failed: {}", e)))?;
+        }
+
+        // V1: stamp the version last, inside the same transaction, so a
+        // vault only ever reads as version 2 once every record in it has
+        // actually been converted.
+        let mut meta = write_txn
+            .open_table(META_TABLE)
+            .map_err(|e| PidagError::Store(format!("Failed to open meta table: {}", e)))?;
+        let version_bytes = bincode::serialize(&CURRENT_SCHEMA_VERSION)
+            .map_err(|e| PidagError::Store(format!("Serialization failed: {}", e)))?;
+        meta.insert(SCHEMA_VERSION_KEY, version_bytes.as_slice())
+            .map_err(|e| PidagError::Store(format!("Insert failed: {}", e)))?;
+    }
+    write_txn
+        .commit()
+        .map_err(|e| PidagError::Store(format!("Commit failed: {}", e)))?;
+    Ok(())
 }
 
 /// Append an event to the log **inside a caller-supplied transaction**.

@@ -9,6 +9,7 @@ use tokio::sync::Mutex;
 // Type alias for event storage complexity
 type EventMap = Arc<Mutex<HashMap<String, Vec<(u64, Event)>>>>;
 
+pub mod legacy;
 pub mod redb_pool;
 pub mod redb_store;
 pub use crate::scheduler::NodeStatus;

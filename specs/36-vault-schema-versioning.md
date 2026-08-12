@@ -4,7 +4,7 @@
 - **Crate**: `pidag`
 - **Priority**: **P0 — a shipped data-loss defect.** Every vault written before spec-34 is
   unreadable by the current build. `.pidag/` is the only record of a run.
-- **Status**: SPECIFIED — not yet dispatched
+- **Status**: IMPLEMENTED, pending V6 withdrawal cleanup — see V6 below
 - **Source**: 2026-08-12. Found by repairing the spec-34 compatibility guard, which had
   been silently disabled by the spec-34 commit itself.
 - **Depends-On**: none. This is a defect fix and precedes further feature work.
@@ -15,12 +15,14 @@
 
 ## Overview
 
-spec-34 changed two serialized fields from `String` to the `NodeStatus` enum:
+spec-34 changed one serialized field from `String` to the `NodeStatus` enum:
 
 | struct | field | before | after |
 |--------|-------|--------|-------|
 | `NodeRecord` (`nodes` table) | `state` | `String` | `NodeStatus` |
-| `Event::…` (`events` table) | `state` | `String` | `NodeStatus` |
+
+(An earlier draft of this spec listed the `events` table too. That was wrong — see the
+V6 withdrawal.)
 
 The store serializes with **bincode**, which is not self-describing. A `String` is written as
 a u64 length prefix followed by bytes; an enum is written as a u32 variant index. They are
@@ -76,8 +78,8 @@ against ~1 day) but would deliver less than what was already claimed to be deliv
   version **greater** than 2 is a hard error naming both versions — a newer pidag wrote it,
   and guessing would corrupt it.
 
-- **V4 (migration is atomic)**: the entire migration — every `nodes` record, every `events`
-  record, and the version stamp — commits in a **single redb write transaction**. A crash
+- **V4 (migration is atomic)**: the entire migration — every `nodes` record and the version
+  stamp — commits in a **single redb write transaction**. A crash
   mid-migration must leave a vault that is still cleanly version 1, never a half-converted
   one. There is no intermediate state that any code needs to recognise.
 
@@ -85,9 +87,32 @@ against ~1 day) but would deliver less than what was already claimed to be deliv
   whose `state` is `String`, converts via `NodeStatus::parse`, and re-encodes as the current
   `NodeRecord`. All other fields round-trip byte-identically.
 
-- **V6 (events table converted)**: the same for `events` records whose variant carries a
-  `state` field, via a frozen `EventV1`. Event **sequence numbers and ordering are preserved
-  exactly** — replay order is the vault's meaning.
+- **V6 — WITHDRAWN 2026-08-12. The premise was wrong; do not implement as written.**
+
+  This required migrating the `events` table via a frozen `EventV1`, on the stated
+  grounds that spec-34 changed an `Event` variant's `state` from `String` to
+  `NodeStatus`. **It did not.** The `state:` assignments spec-34 changed in
+  `src/core/event.rs` are inside `RedbSink`'s handler, where it constructs
+  `NodeRecord` values to write into the **nodes** table. The persisted `Event`
+  enum has no `state` field in any of its nine variants, so the events wire
+  format never changed and there is nothing to migrate.
+
+  The implementation attempt confirmed this empirically against the committed
+  fixture — every event decoded cleanly against the *current* `Event` type — and
+  reported the discrepancy rather than papering over it. It nonetheless built
+  `EventV1` as instructed: a hand-maintained frozen duplicate of a live
+  nine-variant enum performing a pure structural copy. That is permanent
+  maintenance cost and a standing drift hazard for no benefit, and the migration
+  rewrote the largest table in the vault to achieve nothing.
+
+  **Remove `EventV1` and the events pass.** Retain the guarantee as an assertion
+  instead — see V6' — because "events are unaffected" is precisely the claim that
+  justifies not touching them.
+
+- **V6' (events are provably unaffected)**: after a v1 vault migrates, every event still
+  decodes as the current `Event`, and **sequence numbers and ordering are preserved
+  exactly** — replay order is the vault's meaning. This is a read-only assertion over the
+  events table; the migration must not write to it.
 
 - **V7 (unknown status is an error)**: a v1 status string that `NodeStatus::parse` rejects
   aborts the migration with an error naming the run, the node and the offending string. It
@@ -124,9 +149,8 @@ flowchart TD
     B -- "> 2" --> E["Err: vault written by newer pidag"]
     C --> F["single WriteTransaction"]
     F --> G["nodes: NodeRecordV1 -> NodeStatus::parse -> NodeRecord"]
-    F --> H["events: EventV1 -> Event, seq preserved"]
     F --> I["stamp schema_version = 2"]
-    G & H & I --> J["commit -- atomic"]
+    G & I --> J["commit -- atomic"]
     J --> D
 ```
 
@@ -134,10 +158,12 @@ flowchart TD
 `deserialize_any` is unsupported. There is no way to try one shape and fall back. An explicit
 version is the only correct mechanism, and its absence is itself the v1 signal.
 
-**Key decision — frozen mirror types.** `NodeRecordV1` and `EventV1` describe a format that
-already exists in the world and can never change. They must **not** be derived from, aliased
-to, or refactored alongside the live types — that is precisely how the original break
-happened. They live in `src/store/legacy.rs` with a comment saying so.
+**Key decision — a frozen mirror type.** `NodeRecordV1` describes a format that already
+exists in the world and can never change. It must **not** be derived from, aliased to, or
+refactored alongside the live type — that is precisely how the original break happened. It
+lives in `src/store/legacy.rs` with a comment saying so. Only tables whose format actually
+changed get a mirror; adding one speculatively is cost without benefit (see the V6
+withdrawal).
 
 **Key decision — migrate on open, including read paths.** `pidag show` against a v1 vault
 will rewrite it. The alternative — a read-only compatibility path — means maintaining two
@@ -160,8 +186,8 @@ The version stamp is what makes the next hop cheap; building the framework now i
 | V3c | `test_future_version_is_rejected` | `schema_version` = 99 | `Err` naming both 99 and 2; no write |
 | V4 | `test_migration_is_atomic` | migration interrupted before commit | vault still reads as valid v1; no partial conversion |
 | V5 | `test_node_fields_roundtrip` | fixture | `node_id`, `model`, `attempt`, `timestamp` byte-identical pre/post |
-| V6a | `test_events_migrate` | v1 vault with state-carrying events | all events decode as current `Event` |
-| V6b | `test_event_seq_preserved` | v1 vault with 20 events | same seq values, same order, post-migration |
+| V6'a | `test_events_untouched_by_migration` | the committed v1 fixture | every event decodes as the current `Event`; the migration issues **no write** to the events table |
+| V6'b | `test_event_seq_preserved` | v1 vault with events | same seq values, same order, post-migration |
 | V7 | `test_unknown_status_aborts` | v1 record with `state = "Zorp"` | `Err` naming run, node and `"Zorp"`; **not** defaulted to Pending |
 | V8a | `test_fixture_hash_is_pinned` | the committed fixture | sha256 matches the pinned constant |
 | V8b | `test_generator_is_ignored` | source scan of `tests/gen_legacy_vault.rs` | `#[ignore]` present on the generator |
@@ -235,8 +261,8 @@ env PIDAG_REQUIRE_PI=1 cargo test -p pidag -j 2 --no-fail-fast 2>&1 | grep -E '^
   impulse that caused this defect.
 - **G5 — do NOT make V3a pass by weakening it.** Not by loosening an assertion, not by adding
   a skip, not by catching the error. It must pass because the data migrates.
-- **G6 — `NodeRecordV1` / `EventV1` are frozen.** Do not derive them from the live types, do
-  not add fields, do not "keep them in sync". Their entire purpose is to stop changing.
+- **G6 — `NodeRecordV1` is frozen.** Do not derive it from the live type, do not add
+  fields, do not "keep it in sync". Its entire purpose is to stop changing.
 - **G7 — do NOT default an unrecognised status** (V7). Fabricating `Pending` for a node that
   failed produces a wrong resume, which is worse than refusing to open.
 - **G8 — do NOT change the `Store` trait, event ordering, or durability.** Migration writes
@@ -262,8 +288,8 @@ env PIDAG_REQUIRE_PI=1 cargo test -p pidag -j 2 --no-fail-fast 2>&1 | grep -E '^
 
 | File | Change |
 |------|--------|
-| `src/store/legacy.rs` | **NEW** — frozen `NodeRecordV1`, `EventV1` (V5, V6) |
-| `src/store/redb_store.rs` | `meta` table, version detect, atomic migration in `open` (V1–V7) |
+| `src/store/legacy.rs` | **NEW** — frozen `NodeRecordV1` (V5). **No `EventV1`** — V6 withdrawn |
+| `src/store/redb_store.rs` | `meta` table, version detect, atomic migration in `open` (V1–V5, V7) |
 | `src/scheduler/mod.rs` | correct the `NodeStatus` doc comment (V9) |
 | `tests/gen_legacy_vault.rs` | `#[ignore]` — already applied, keep (V8b) |
 | `tests/typed_state_tests.rs` | open a copy under `_tmp/`, not the fixture — already applied |
