@@ -43,7 +43,7 @@ use tokio::process::Command;
 ///
 /// ```
 /// # use pidag::is_a2a_endpoint;
-/// assert!(is_a2a_endpoint("https://${DEPLOY_HOST_NAME}:7422/agents/hermes"));
+/// assert!(is_a2a_endpoint("https://agents.example.com:7422/agents/hermes"));
 /// assert!(is_a2a_endpoint("http://localhost:8080"));
 /// assert!(!is_a2a_endpoint("nvidia/z-ai/glm-5.2"));
 /// ```

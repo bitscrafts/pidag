@@ -64,6 +64,16 @@ defect: on resume the tree is already dirty, so "is the tree dirty" is satisfied
 node runs — and a node that did nothing verified green. See
 [docs/FINDINGS.md](docs/FINDINGS.md).
 
+## Requirements
+
+- **Rust stable** — that is all you need to build, run shell-node DAGs, and use the UI.
+- **An agent binary and provider credentials** for LLM nodes. pidag drives
+  [pi](https://github.com/bitscrafts/pi_agent_rust) as its worker; set
+  `PIDAG_AGENT_BACKEND=pi` and provide the relevant `*_API_KEY`.
+
+Shell-only DAGs need neither, which is what the benchmark and most tests use — they
+exercise the scheduler, gates, verification and store with no model calls at all.
+
 ## Quick start
 
 ```bash
@@ -74,7 +84,7 @@ cd my-project && git init -q .          # the project root must be its own git r
 pidag attach                            # creates .pidag/
 pidag split specs/01-feature.md --auto  # only if it has more than 7 exit criteria
 pidag sdd specs/01-feature.md --run --model <model>
-pidag ui                                # http://localhost:4601
+pidag ui                                # http://localhost:4600
 ```
 
 Two prerequisites that otherwise waste a session:

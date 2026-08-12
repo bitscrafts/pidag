@@ -373,7 +373,7 @@ quality_gate_script = "{quality_gate_script}"
 
 [models]
 # A2A remote agents: use a URL with an optional #skill fragment.
-#   "https://${DEPLOY_HOST_NAME}:7422/agents/hermes#research"
+#   "https://agents.example.com:7422/agents/hermes#research"
 # Routed to A2aWorker (curl + JSON-RPC) instead of PiPrintWorker.
 # Free models tried in order (SDD iterations 1-2)
 free = [

@@ -39,7 +39,9 @@ fn single_node_dag(id: &str, prompt: &str) -> pidag::Dag {
 /// T1: `is_a2a_endpoint` returns `true` for URLs, `false` for plain model names.
 #[test]
 fn test_a2a_url_detection() {
-    assert!(is_a2a_endpoint("https://${DEPLOY_HOST_NAME}:7422/agents/hermes"));
+    assert!(is_a2a_endpoint(
+        "https://agents.example.com:7422/agents/hermes"
+    ));
     assert!(is_a2a_endpoint("http://localhost:8080"));
     assert!(!is_a2a_endpoint("nvidia/z-ai/glm-5.2"));
     assert!(!is_a2a_endpoint("phi-4"));

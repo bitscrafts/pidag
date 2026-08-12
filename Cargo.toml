@@ -21,7 +21,11 @@ sha2 = "0.10"
 axum = "0.8"
 tower = { version = "0.5", features = ["util"] }
 rmcp = { version = "2.2", features = ["server", "transport-io", "macros"] }
-pi = { package = "pi_agent_rust", path = "/projects/_upstream/pi_agent_rust", default-features = false }
+# Pinned to a revision rather than a branch: the build must be reproducible,
+# and a moving branch would silently change what pidag is compiled against.
+# This was an absolute local path, which meant pidag could not be built outside
+# the container it was developed in.
+pi = { package = "pi_agent_rust", git = "https://github.com/bitscrafts/pi_agent_rust.git", rev = "f87d3ff247cb", default-features = false }
 
 [features]
 mirror = ["reqwest"]
