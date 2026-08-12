@@ -61,13 +61,13 @@ supervisor-worker split. It is missing the critic.
 | retry, model fallback chain | ✅ | — |
 | conditional gates, ordering edges | ✅ | — |
 | checkpoint / resume / event log / UI | ✅ | — |
-| effect verification (`verify`) | ⚠️ **shell only** | **cannot use a model as critic** |
+| effect verification (`verify`) | ✅ shell, critic, or both (spec-37) | — |
 | upstream output into a downstream prompt | ✅ (spec-29) | — |
-| **critic / reviewer node** | ❌ | the single highest-value gap |
-| **parallel ensemble + adjudication** | ❌ | no way to run N models and compare |
-| fan-out over a parameter list | ❌ | `research` template hardcodes 3 branches |
+| **critic / reviewer node** | ✅ (spec-37) | not yet run against a live model |
+| **parallel ensemble + adjudication** | ✅ (spec-38) | not yet run against live models |
+| fan-out over a parameter list | ✅ `for_each` (spec-38) | — |
 | composition (DAG within DAG) | ❌ | audit C-1 |
-| budget ceiling | ❌ | `--allow-paid` is a boolean, not a limit |
+| budget ceiling | ⚠️ specified (spec-39) | `--allow-paid` is a boolean, not a limit |
 | work decomposition (`split`) | ⚠️ | divides the checklist, not the work |
 
 ## 4. The one change that matters most: `verify` becomes a critic
@@ -131,11 +131,27 @@ cheapest available answer to "who checks the checker".
 | `Verify::Critic` — model as verifier | **2–3 d** | verification gap (21%) |
 | `for_each` fan-out over a parameter list | 1 d | C-2, enables ensembles |
 | quorum/adjudication helper | 1 d | ensemble without an extra model call |
-| budget ceiling (`--max-spend`, abort on breach) | 0.5 d | the $50k-at-scale caution |
+| budget ceiling (`--max-tokens` + `--max-model-calls`, abort on breach) | 1 d | the $50k-at-scale caution |
 | `split`: narrow Architecture per child | 0.5 d | U-2 remainder |
 | spec `Status` fields + CI + remote | 1 d | the specs currently lie; the gate is manual |
 
 **≈ 6–7 days** to a genuinely capable implementer.
+
+**Progress, 2026-08-12.** `Verify::Critic` (spec-37), `for_each` and quorum (spec-38), and
+spec `Status` fields with CI all landed; the budget ceiling is specified as spec-39 and
+`split` narrowing remains. Two corrections to the table above, both found by checking the
+code before writing the spec rather than after:
+
+- The budget ceiling is **not** `--max-spend`. There is no cost data in pidag —
+  `WorkerOutput` carries none, and the backend's `usage` is discarded at the `AgentWorker`
+  boundary. Dollars would need a price table that goes stale on any provider change and is
+  wrong for the free-tier and self-hosted models pidag mostly drives. It counts tokens and
+  model calls instead, which are facts pidag observes rather than estimates it cannot
+  reconcile. 1 d, not 0.5.
+- The critic and the ensemble are proven in wiring but **not against a live model** — this
+  container has no credentials. The topology, the vote, the gate and the vault are real;
+  no critic has yet faced a model. That is the remaining gap before "genuinely capable"
+  is a claim rather than a design.
 
 ### Do not build
 
