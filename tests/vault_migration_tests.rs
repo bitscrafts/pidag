@@ -12,7 +12,7 @@
 //! the one genuine legacy artifact that exists (spec-36 G4).
 
 use pidag::core::event::Event;
-use pidag::store::legacy::{EventV1, NodeRecordV1};
+use pidag::store::legacy::NodeRecordV1;
 use pidag::store::{NodeStatus, RedbStore, RunMeta, Store};
 use redb::{Database, ReadableTable, TableDefinition};
 use sha2::{Digest, Sha256};
@@ -48,9 +48,11 @@ fn copy_fixture_into(dest: &Path) {
 /// Write a raw v1-shaped vault directly via `redb`, bypassing `Store`
 /// (which always writes the *current* record shape). Mirrors exactly what a
 /// pre-spec-34 build wrote: no `meta` table, `NodeRecordV1` (plain `String`
-/// state) in `nodes`, `EventV1` in `events`, keyed the same way `RedbStore`
-/// keys them today.
-fn write_v1_vault(path: &Path, run_id: &str, nodes: &[NodeRecordV1], events: &[EventV1]) {
+/// state) in `nodes`. `events` uses the current `Event` type directly --
+/// spec-36's V6 withdrawal established that spec-34 never changed the events
+/// wire format, so a v1-era `events` table is byte-for-byte what `Event`
+/// serializes today; there is no separate `EventV1` shape to mirror.
+fn write_v1_vault(path: &Path, run_id: &str, nodes: &[NodeRecordV1], events: &[Event]) {
     let db = Database::create(path).expect("create v1 db");
     let write_txn = db.begin_write().expect("begin write");
     {
@@ -131,6 +133,52 @@ fn read_node_raw_v1(path: &Path, run_id: &str, node_id: &str) -> NodeRecordV1 {
         .value()
         .to_vec();
     bincode::deserialize(&bytes).expect("decode as NodeRecordV1")
+}
+
+/// Snapshot every `events` table entry as raw (key, value) bytes, in
+/// iteration order. Used to prove the migration issues no write to the
+/// events table (spec-36 V6'): if this is byte-identical before and after
+/// `RedbStore::open`, nothing in the table changed.
+fn read_events_raw(path: &Path) -> Vec<(String, Vec<u8>)> {
+    let db = Database::open(path).expect("open db to read events");
+    let read_txn = db.begin_read().expect("begin read");
+    let events = read_txn.open_table(EVENTS_TABLE).expect("open events");
+    let mut out = Vec::new();
+    for entry in events.iter().expect("iterate events") {
+        let (k, v) = entry.expect("read entry");
+        out.push((k.value().to_string(), v.value().to_vec()));
+    }
+    out
+}
+
+/// The comparable subset of `redb::TableStats` (which has no `PartialEq` of
+/// its own). A second, storage-layer signal alongside `read_events_raw`
+/// that the events table's on-disk B-tree was never touched: page counts /
+/// tree height / stored & fragmented bytes are exactly what an insert or
+/// remove -- even of already-identical bytes -- would be expected to move.
+#[derive(Debug, PartialEq)]
+struct EventsTableStats {
+    tree_height: u32,
+    leaf_pages: u64,
+    branch_pages: u64,
+    stored_bytes: u64,
+    metadata_bytes: u64,
+    fragmented_bytes: u64,
+}
+
+fn read_events_table_stats(path: &Path) -> EventsTableStats {
+    let db = Database::open(path).expect("open db to read events stats");
+    let read_txn = db.begin_read().expect("begin read");
+    let events = read_txn.open_table(EVENTS_TABLE).expect("open events");
+    let stats = events.stats().expect("events table stats");
+    EventsTableStats {
+        tree_height: stats.tree_height(),
+        leaf_pages: stats.leaf_pages(),
+        branch_pages: stats.branch_pages(),
+        stored_bytes: stats.stored_bytes(),
+        metadata_bytes: stats.metadata_bytes(),
+        fragmented_bytes: stats.fragmented_bytes(),
+    }
 }
 
 fn sha256_hex(path: &Path) -> String {
@@ -416,76 +464,98 @@ async fn test_node_fields_roundtrip() {
 }
 
 // ---------------------------------------------------------------------
-// V6a: test_events_migrate
+// V6'a: test_events_untouched_by_migration
 // ---------------------------------------------------------------------
+//
+// spec-36's V6 withdrawal: spec-34 never changed the `Event` wire format --
+// no persisted variant carries a `state` field -- so there is nothing to
+// migrate in the events table. This test proves both halves of V6' against
+// the genuine committed fixture: every event still decodes as the current
+// `Event`, and the migration issues NO write to the events table at all.
 
 #[tokio::test]
-async fn test_events_migrate() {
-    let dir = work_dir("events_migrate");
-    let db_path = dir.join("vault.redb");
+async fn test_events_untouched_by_migration() {
+    let dir = work_dir("events_untouched_by_migration");
+    let db_path = dir.join("legacy.redb");
+    copy_fixture_into(&db_path);
 
-    let v1_events = vec![
-        EventV1::DagSubmitted,
-        EventV1::NodeDispatched {
-            node_id: "alpha".to_string(),
-            model: "m1".to_string(),
-            attempt: 1,
-        },
-        EventV1::NodeDone {
-            node_id: "alpha".to_string(),
-            model: "m1".to_string(),
-            output: "ok".to_string(),
-        },
-        EventV1::NodeFailed {
-            node_id: "beta".to_string(),
-            error: "boom".to_string(),
-        },
-        EventV1::NodeBlocked {
-            node_id: "gamma".to_string(),
-        },
-        EventV1::NodeRetry {
-            node_id: "beta".to_string(),
-            reason: "retrying".to_string(),
-        },
-        EventV1::ProviderFallback {
-            node_id: "beta".to_string(),
-            from_model: "m1".to_string(),
-            to_model: "m2".to_string(),
-        },
-        EventV1::NodeSkipped {
-            node_id: "delta".to_string(),
-            reason: "gated off".to_string(),
-        },
-        EventV1::NodeVerifyFailed {
-            node_id: "alpha".to_string(),
-            worker_claim: "done".to_string(),
-            verify_output: "nope".to_string(),
-        },
-        EventV1::DagDone {
-            successful_nodes: 1,
-            failed_nodes: 1,
-        },
-    ];
-    write_v1_vault(&db_path, "run1", &[], &v1_events);
+    // Snapshot the events table's raw entries and storage stats BEFORE
+    // migration -- read directly via redb, never through `RedbStore` (which
+    // would trigger the very migration this test is trying to observe).
+    let before_entries = read_events_raw(&db_path);
+    let before_stats = read_events_table_stats(&db_path);
+    assert!(
+        !before_entries.is_empty(),
+        "precondition: the fixture must actually have events for this test to mean anything"
+    );
 
-    let store = RedbStore::open(&db_path).expect("open + migrate");
-    let events = store.load_events("run1").await.expect("load_events");
+    // Every event must already decode as the CURRENT `Event` type, even
+    // before migration -- this is the empirical claim the V6 withdrawal
+    // rests on: the events wire format never changed.
+    for (key, bytes) in &before_entries {
+        let _: Event = bincode::deserialize(bytes)
+            .unwrap_or_else(|e| panic!("event {:?} must decode as current Event: {}", key, e));
+    }
 
-    assert_eq!(events.len(), v1_events.len());
-    assert!(matches!(events[0], Event::DagSubmitted));
-    assert!(matches!(events[1], Event::NodeDispatched { .. }));
-    assert!(matches!(events[2], Event::NodeDone { .. }));
-    assert!(matches!(events[3], Event::NodeFailed { .. }));
-    assert!(matches!(events[4], Event::NodeBlocked { .. }));
-    assert!(matches!(events[5], Event::NodeRetry { .. }));
-    assert!(matches!(events[6], Event::ProviderFallback { .. }));
-    assert!(matches!(events[7], Event::NodeSkipped { .. }));
-    assert!(matches!(events[8], Event::NodeVerifyFailed { .. }));
-    assert!(matches!(events[9], Event::DagDone { .. }));
+    {
+        let store = RedbStore::open(&db_path).expect("open + migrate fixture");
+        // Exercise the read path too, through the typed Store API.
+        let events = store.load_events("legacy1").await.expect("load_events");
+        assert_eq!(events.len(), before_entries.len());
+    } // drop before reading the file directly -- redb holds an exclusive lock
+
+    // Confirm the vault actually migrated (nodes/meta DID change) -- so
+    // "the events table didn't change" below is a real claim about a
+    // migration that ran, not a vacuous one about a no-op open.
+    assert_eq!(
+        read_schema_version_raw(&db_path),
+        Some(2),
+        "precondition: the vault must actually have migrated to v2"
+    );
+
+    // The events table itself must be byte-for-byte identical: same keys,
+    // same values, same order -- direct proof at the data level.
+    let after_entries = read_events_raw(&db_path);
+    assert_eq!(
+        before_entries, after_entries,
+        "migration must not alter a single byte of the events table"
+    );
+
+    // The storage layer agrees: no page-level churn in the events table's
+    // B-tree (tree height / page counts / stored & fragmented bytes all
+    // unchanged) -- the strongest signal available through redb's public
+    // API that no insert/remove was ever issued against this table.
+    let after_stats = read_events_table_stats(&db_path);
+    assert_eq!(
+        before_stats, after_stats,
+        "events table storage stats must be unchanged -- no write was issued to it"
+    );
+
+    // And most directly of all: the migration's own source contains no
+    // write call site for the events table. `migrate_v1_to_v2` only ever
+    // opens EVENTS_TABLE to ensure it exists for a brand-new vault; it
+    // never binds it mutably and never calls `.insert`/`.remove` on it.
+    let src = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/store/redb_store.rs"),
+    )
+    .expect("read src/store/redb_store.rs");
+    let fn_start = src
+        .find("fn migrate_v1_to_v2")
+        .expect("migrate_v1_to_v2 must exist");
+    let fn_end = src[fn_start..]
+        .find("\nfn ")
+        .map(|off| fn_start + off)
+        .unwrap_or(src.len());
+    let fn_body = &src[fn_start..fn_end];
+    assert!(
+        !fn_body.contains("mut events"),
+        "migrate_v1_to_v2 must never bind the events table mutably: {}",
+        fn_body
+    );
 }
 
 // ---------------------------------------------------------------------
-// V6b: test_event_seq_preserved
+// V6'b: test_event_seq_preserved
 // ---------------------------------------------------------------------
 
 #[tokio::test]
@@ -493,8 +563,8 @@ async fn test_event_seq_preserved() {
     let dir = work_dir("event_seq_preserved");
     let db_path = dir.join("vault.redb");
 
-    let v1_events: Vec<EventV1> = (0..20)
-        .map(|i| EventV1::NodeRetry {
+    let v1_events: Vec<Event> = (0..20)
+        .map(|i| Event::NodeRetry {
             node_id: format!("node{}", i),
             reason: format!("reason{}", i),
         })

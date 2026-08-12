@@ -4,7 +4,7 @@
 - **Crate**: `pidag`
 - **Priority**: **P0 — a shipped data-loss defect.** Every vault written before spec-34 is
   unreadable by the current build. `.pidag/` is the only record of a run.
-- **Status**: IMPLEMENTED, pending V6 withdrawal cleanup — see V6 below
+- **Status**: IMPLEMENTED and verified. V6 withdrawn (see below); all other requirements met.
 - **Source**: 2026-08-12. Found by repairing the spec-34 compatibility guard, which had
   been silently disabled by the spec-34 commit itself.
 - **Depends-On**: none. This is a defect fix and precedes further feature work.

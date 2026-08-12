@@ -129,8 +129,23 @@ had just written.
 > consumer had become the same build, so the guard could not fail no matter what the format
 > did. Pin the artifact's hash, or the guard silently becomes decorative.
 
-Restoring the genuine blob made it fail on the first run. The fix is specified as spec-36
-(vault schema versioning and v1 migration) and is not yet implemented.
+Restoring the genuine blob made it fail on the first run. Fixed by spec-36: vaults now carry
+an explicit schema version, and a v1 vault migrates on open inside a single write transaction
+with the version stamped last, so it only reads as v2 once every record has actually been
+converted.
+
+There is a tail to this one. spec-36 as written also required migrating the `events` table,
+on the premise that spec-34 had changed an `Event` variant's `state` field too. It had not —
+the `state:` assignments spec-34 touched in `event.rs` are inside the sink's handler, where
+it builds `NodeRecord` values for the *nodes* table, and no `Event` variant carries a `state`
+field at all. The implementing agent checked this against the real fixture, found every event
+decoded cleanly, **reported the discrepancy instead of quietly working around it**, and built
+the frozen mirror type anyway because the spec said so. It was then withdrawn and removed.
+
+That is the orchestrator failing the same way twice in one spec: the defect was a false
+compatibility claim, and the fix for it shipped with a false claim of its own. It also shows
+the guardrail working — a spec that forbids the workhorse from editing requirements gets the
+disagreement surfaced rather than absorbed.
 
 ## Where the failures actually came from
 

@@ -1,4 +1,4 @@
-use super::legacy::{EventV1, NodeRecordV1};
+use super::legacy::NodeRecordV1;
 use super::{NodeRecord, NodeStatus, NodeTiming, RunMeta, Store};
 use crate::core::error::PidagError;
 use crate::core::event::Event;
@@ -142,12 +142,15 @@ fn read_schema_version(db: &Database) -> Result<u32, PidagError> {
     }
 }
 
-/// Migrate a version-1 vault to version 2 (spec-36 V3/V4/V5/V6). Converts
-/// every `nodes` record (`NodeRecordV1` -> `NodeRecord`, via
-/// `NodeStatus::parse`) and every `events` record (`EventV1` -> `Event`,
-/// same key so sequence numbers and ordering are byte-for-byte preserved),
-/// then stamps `schema_version = 2`. Also ensures every base table exists,
-/// so this same path handles a brand-new vault (V1).
+/// Migrate a version-1 vault to version 2 (spec-36 V3/V4/V5). Converts every
+/// `nodes` record (`NodeRecordV1` -> `NodeRecord`, via `NodeStatus::parse`),
+/// then stamps `schema_version = 2`. Also ensures every base table exists, so
+/// this same path handles a brand-new vault (V1).
+///
+/// V6' (spec-36): the events table is untouched. spec-34 never changed the
+/// `Event` wire format -- no persisted variant has a `state` field -- so
+/// there is nothing to migrate there; this function does not read or write
+/// `EVENTS_TABLE` beyond ensuring it exists for a brand-new vault.
 ///
 /// V4: all of this happens in a SINGLE write transaction. If anything fails
 /// before `commit()` is reached, the `?` returns out of this function with
@@ -168,7 +171,9 @@ fn migrate_v1_to_v2(db: &Database, path: &Path) -> Result<(), PidagError> {
         let mut nodes = write_txn
             .open_table(NODES_TABLE)
             .map_err(|e| PidagError::Store(format!("Failed to open nodes table: {}", e)))?;
-        let mut events = write_txn
+        // V6': ensure the table exists (for a brand-new vault) but never
+        // read or write its entries -- the events format never changed.
+        let _ = write_txn
             .open_table(EVENTS_TABLE)
             .map_err(|e| PidagError::Store(format!("Failed to open events table: {}", e)))?;
         let _ = write_txn
@@ -220,38 +225,6 @@ fn migrate_v1_to_v2(db: &Database, path: &Path) -> Result<(), PidagError> {
             let reencoded = bincode::serialize(&migrated)
                 .map_err(|e| PidagError::Store(format!("Serialization failed: {}", e)))?;
             nodes
-                .insert(key.as_str(), reencoded.as_slice())
-                .map_err(|e| PidagError::Store(format!("Insert failed: {}", e)))?;
-        }
-
-        // V6: events table, EventV1 -> Event. Same read-then-write shape;
-        // keys (and therefore sequence numbers / ordering) are untouched --
-        // only the value bytes for each existing key are replaced.
-        let event_entries: Vec<(String, Vec<u8>)> = {
-            let iter = events
-                .iter()
-                .map_err(|e| PidagError::Store(format!("Range iteration failed: {}", e)))?;
-            let mut collected = Vec::new();
-            for entry in iter {
-                let (k, v) =
-                    entry.map_err(|e| PidagError::Store(format!("Entry read failed: {}", e)))?;
-                collected.push((k.value().to_string(), v.value().to_vec()));
-            }
-            collected
-        };
-        for (key, bytes) in event_entries {
-            let v1: EventV1 = bincode::deserialize(&bytes).map_err(|e| {
-                PidagError::Store(format!(
-                    "Vault migration failed for {} (event {:?}): record is not valid v1 data: {}",
-                    path.display(),
-                    key,
-                    e
-                ))
-            })?;
-            let migrated = v1.migrate();
-            let reencoded = bincode::serialize(&migrated)
-                .map_err(|e| PidagError::Store(format!("Serialization failed: {}", e)))?;
-            events
                 .insert(key.as_str(), reencoded.as_slice())
                 .map_err(|e| PidagError::Store(format!("Insert failed: {}", e)))?;
         }
