@@ -1,9 +1,19 @@
 use pidag::{
     AwaitOutcome, Dag, ModelsConfig, Node, NodeStatus, RealShellWorker, RetryPolicy, Scheduler,
-    SddGenerator, VecSink,
+    SddGenerator, VecSink, Verify,
 };
 use std::path::PathBuf;
 use std::time::Duration;
+
+/// Extract the shell command string from a `Verify::Shell` arm. Every node
+/// literal in this file pre-dates spec-37 and uses the shell form, so a
+/// panic on a non-Shell arm is the correct failure mode for this helper.
+fn verify_shell(v: &Option<Verify>) -> &str {
+    match v {
+        Some(Verify::Shell(cmd)) => cmd.as_str(),
+        other => panic!("expected Verify::Shell, got {other:?}"),
+    }
+}
 
 // ============================================================================
 // Test 1: test_verify_passes_node_done
@@ -38,7 +48,7 @@ async fn test_verify_passes_node_done() {
             mcp_call: None,
             after: vec![],
             // Verify checks for the marker file
-            verify: Some("test -f marker.txt".to_string()),
+            verify: Some(Verify::Shell("test -f marker.txt".to_string())),
             verify_pre: None,
         }],
     };
@@ -46,7 +56,7 @@ async fn test_verify_passes_node_done() {
     // Just verify the node has the verify field
     let node = dag.get_node("test_node").expect("node should exist");
     assert!(node.verify.is_some(), "node should have verify field");
-    assert_eq!(node.verify.as_ref().unwrap(), "test -f marker.txt");
+    assert_eq!(verify_shell(&node.verify), "test -f marker.txt");
 }
 
 // ============================================================================
@@ -77,7 +87,7 @@ async fn test_verify_fails_node_failed() {
             mcp_call: None,
             after: vec![],
             // Verify fails: file doesn't exist
-            verify: Some("test -f nonexistent.txt".to_string()),
+            verify: Some(Verify::Shell("test -f nonexistent.txt".to_string())),
             verify_pre: None,
         }],
     };
@@ -157,7 +167,9 @@ async fn test_verify_runs_in_project_root() {
             mcp_call: None,
             after: vec![],
             // Verify checks for both marker and output file
-            verify: Some("test -f marker.txt && test -f output.txt".to_string()),
+            verify: Some(Verify::Shell(
+                "test -f marker.txt && test -f output.txt".to_string(),
+            )),
             verify_pre: None,
         }],
     };
@@ -165,7 +177,7 @@ async fn test_verify_runs_in_project_root() {
     // Verify the node structure is correct
     let node = dag.get_node("test_node").expect("node should exist");
     assert!(node.verify.is_some(), "node should have verify field");
-    assert!(node.verify.as_ref().unwrap().contains("marker.txt"));
+    assert!(verify_shell(&node.verify).contains("marker.txt"));
 }
 
 // ============================================================================
@@ -196,7 +208,7 @@ async fn test_success_alone_cannot_promote_when_verify_set() {
             mcp_call: None,
             after: vec![],
             // Verify fails
-            verify: Some("exit 1".to_string()),
+            verify: Some(Verify::Shell("exit 1".to_string())),
             verify_pre: None,
         }],
     };
@@ -205,7 +217,7 @@ async fn test_success_alone_cannot_promote_when_verify_set() {
     // Here we just verify the node is properly configured
     let node = dag.get_node("test_node").expect("node should exist");
     assert!(node.verify.is_some(), "node should have verify field");
-    assert_eq!(node.verify.as_ref().unwrap(), "exit 1");
+    assert_eq!(verify_shell(&node.verify), "exit 1");
 }
 
 // ============================================================================
@@ -235,7 +247,7 @@ async fn test_verify_failure_not_retryable() {
             timeout: None,
             mcp_call: None,
             after: vec![],
-            verify: Some("exit 1".to_string()),
+            verify: Some(Verify::Shell("exit 1".to_string())),
             verify_pre: None,
         }],
     };
@@ -273,7 +285,7 @@ async fn test_verify_failure_event_states_both_facts() {
             timeout: None,
             mcp_call: None,
             after: vec![],
-            verify: Some("echo verify_failed && exit 1".to_string()),
+            verify: Some(Verify::Shell("echo verify_failed && exit 1".to_string())),
             verify_pre: None,
         }],
     };
@@ -329,12 +341,12 @@ None.
         "implement-iter1 should have verify field"
     );
     assert!(
-        !impl1.verify.as_ref().unwrap().is_empty(),
+        !verify_shell(&impl1.verify).is_empty(),
         "verify should not be empty"
     );
     // The new verify uses git status instead of git diff
     assert!(
-        impl1.verify.as_ref().unwrap().contains("git status"),
+        verify_shell(&impl1.verify).contains("git status"),
         "verify should check git status"
     );
     // Also check that verify_pre is set
@@ -356,7 +368,7 @@ None.
         "implement-iter2 should have verify field"
     );
     assert!(
-        !impl2.verify.as_ref().unwrap().is_empty(),
+        !verify_shell(&impl2.verify).is_empty(),
         "verify should not be empty"
     );
 
@@ -369,7 +381,7 @@ None.
         "implement-iter3 should have verify field"
     );
     assert!(
-        !impl3.verify.as_ref().unwrap().is_empty(),
+        !verify_shell(&impl3.verify).is_empty(),
         "verify should not be empty"
     );
 }
@@ -401,7 +413,7 @@ async fn test_verify_with_timeout() {
             timeout: Some(Duration::from_secs(5)), // Node has timeout
             mcp_call: None,
             after: vec![],
-            verify: Some("test -f marker.txt".to_string()),
+            verify: Some(Verify::Shell("test -f marker.txt".to_string())),
             verify_pre: None,
         }],
     };
@@ -440,7 +452,7 @@ async fn test_no_verify_on_other_node_types() {
             timeout: None,
             mcp_call: None,
             after: vec![],
-            verify: Some("test -f file.txt".to_string()),
+            verify: Some(Verify::Shell("test -f file.txt".to_string())),
             verify_pre: None,
         }],
     };
@@ -469,7 +481,9 @@ async fn test_no_verify_on_other_node_types() {
             timeout: None,
             mcp_call: None,
             after: vec![],
-            verify: Some("git diff --quiet && exit 1 || exit 0".to_string()),
+            verify: Some(Verify::Shell(
+                "git diff --quiet && exit 1 || exit 0".to_string(),
+            )),
             verify_pre: None,
         }],
     };
@@ -504,7 +518,7 @@ async fn test_verify_integration_passes() {
             mcp_call: None,
             after: vec![],
             // Simple verify that always succeeds
-            verify: Some("exit 0".to_string()),
+            verify: Some(Verify::Shell("exit 0".to_string())),
             verify_pre: None,
         }],
     };
@@ -552,7 +566,7 @@ async fn test_verify_integration_fails() {
             mcp_call: None,
             after: vec![],
             // Verify fails: exit with non-zero
-            verify: Some("exit 1".to_string()),
+            verify: Some(Verify::Shell("exit 1".to_string())),
             verify_pre: None,
         }],
     };
@@ -603,7 +617,7 @@ async fn test_verify_pre_absent_behaves_as_before() {
             timeout: None,
             mcp_call: None,
             after: vec![],
-            verify: Some("exit 0".to_string()),
+            verify: Some(Verify::Shell("exit 0".to_string())),
             verify_pre: None,
         }],
     };
@@ -642,7 +656,9 @@ async fn test_verify_pre_exposed_as_env() {
             timeout: None,
             mcp_call: None,
             after: vec![],
-            verify: Some("test \"$PIDAG_VERIFY_PRE\" = TOKEN123".to_string()),
+            verify: Some(Verify::Shell(
+                "test \"$PIDAG_VERIFY_PRE\" = TOKEN123".to_string(),
+            )),
             verify_pre: Some("echo TOKEN123".to_string()),
         }],
     };
@@ -681,7 +697,7 @@ async fn test_verify_pre_failure_fails_node() {
             timeout: None,
             mcp_call: None,
             after: vec![],
-            verify: Some("exit 0".to_string()),
+            verify: Some(Verify::Shell("exit 0".to_string())),
             verify_pre: Some("exit 3".to_string()),
         }],
     };
@@ -809,9 +825,9 @@ async fn test_dirty_tree_at_start_does_not_satisfy_verify() {
             mcp_call: None,
             after: vec![],
             // The new delta-based verify: check if the tree changed DURING this node
-            verify: Some(format!(
+            verify: Some(Verify::Shell(format!(
                 "cd {repo} && test \"$( ( git status --porcelain; git diff; git diff --cached; git ls-files -o --exclude-standard -z | xargs -0 -r sha256sum ) | sha256sum )\" != \"$PIDAG_VERIFY_PRE\""
-            )),
+            ))),
             verify_pre: Some(format!(
                 "cd {repo} && ( git status --porcelain; git diff; git diff --cached; git ls-files -o --exclude-standard -z | xargs -0 -r sha256sum ) | sha256sum"
             )),
@@ -916,9 +932,9 @@ async fn test_new_change_on_dirty_tree_passes() {
             mcp_call: None,
             after: vec![],
             // The new delta-based verify: check if the tree changed DURING this node
-            verify: Some(format!(
+            verify: Some(Verify::Shell(format!(
                 "cd {repo} && test \"$( ( git status --porcelain; git diff; git diff --cached; git ls-files -o --exclude-standard -z | xargs -0 -r sha256sum ) | sha256sum )\" != \"$PIDAG_VERIFY_PRE\""
-            )),
+            ))),
             verify_pre: Some(format!(
                 "cd {repo} && ( git status --porcelain; git diff; git diff --cached; git ls-files -o --exclude-standard -z | xargs -0 -r sha256sum ) | sha256sum"
             )),
@@ -986,10 +1002,10 @@ async fn test_verify_pre_output_capped() {
             mcp_call: None,
             after: vec![],
             // Succeeds only if the token was truncated to at most 4096 bytes.
-            verify: Some(
+            verify: Some(Verify::Shell(
                 "test \"${#PIDAG_VERIFY_PRE}\" -le 4096 && test -n \"$PIDAG_VERIFY_PRE\""
                     .to_string(),
-            ),
+            )),
             verify_pre: Some("printf '\\u2713%.0s' $(seq 1 3000)".to_string()),
         }],
     };
@@ -1078,9 +1094,9 @@ async fn test_content_only_change_on_dirty_tree_passes() {
             timeout: None,
             mcp_call: None,
             after: vec![],
-            verify: Some(format!(
+            verify: Some(Verify::Shell(format!(
                 "cd {repo} && test \"$( {snip} )\" != \"$PIDAG_VERIFY_PRE\""
-            )),
+            ))),
             verify_pre: Some(format!("cd {repo} && {snip}")),
         }],
     };

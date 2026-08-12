@@ -921,7 +921,7 @@ fn test_clean_expansion_has_no_residual_braces() {
         if let Some(ref g) = node.gate {
             check_field(g);
         }
-        if let Some(ref v) = node.verify {
+        if let Some(pidag::Verify::Shell(ref v)) = node.verify {
             check_field(v);
         }
         for dep in &node.depends_on {

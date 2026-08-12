@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::core::dag::{Dag, Node, RetryPolicy};
+use crate::core::dag::{Dag, Node, RetryPolicy, Verify};
 use crate::core::error::PidagError;
 
 /// A workflow template that can be expanded into a DAG.
@@ -43,6 +43,10 @@ pub struct TemplateNode {
     pub after: Vec<String>,
     #[serde(default)]
     pub gate: Option<String>,
+    /// Authored as a bare shell-command string in TOML; `expand_node` wraps
+    /// it into `Verify::Shell` when building the `Node` (spec-37, C2b).
+    /// Authoring a `Critic`/`All` verify from a template is out of scope
+    /// (G8) — a template can only produce a shell verify today.
     #[serde(default)]
     pub verify: Option<String>,
     #[serde(default)]
@@ -400,7 +404,10 @@ impl WorkflowEngine {
 
         let id = substitute(&node.id);
         let gate = node.gate.as_ref().map(|g| substitute(g));
-        let verify = node.verify.as_ref().map(|v| substitute(v));
+        // spec-37 (C2b): a template still authors verify as a bare string;
+        // wrap it into the widened `Verify` shape here so `Node.verify`
+        // (now `Option<Verify>`) is produced identically to before.
+        let verify = node.verify.as_ref().map(|v| Verify::Shell(substitute(v)));
         let verify_pre = node.verify_pre.as_ref().map(|v| substitute(v));
 
         Ok(Node {

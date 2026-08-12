@@ -48,14 +48,16 @@ pub struct Node {
     /// so existing DAG JSON parses and behaves identically.
     #[serde(default)]
     pub after: Vec<String>,
-    /// Shell command to verify the worker's claim of success. When present, a
-    /// node is `Done` only if the worker succeeded AND this command exits 0.
-    /// Worker success with `verify` failing ⇒ node is `Failed` with verify
-    /// output as the artifact. Runs in the DAG's project_root with the same
-    /// cwd/env/timeout discipline as a `shell` node. Defaults to absent;
-    /// DAGs without it behave exactly as today (N1).
+    /// Verification seam for the worker's claim of success (spec-37). When
+    /// present, a node is `Done` only if the worker succeeded AND this
+    /// `Verify` passes. Worker success with `verify` failing ⇒ node is
+    /// `Failed`, with `"worker: <claim>\nverify: <reason>"` as the artifact.
+    /// `Verify::Shell` runs in the DAG's project_root with the same
+    /// cwd/env/timeout discipline as a `shell` node, byte-identical to the
+    /// pre-spec-37 behaviour (N1). Defaults to absent; DAGs without it
+    /// behave exactly as today.
     #[serde(default)]
-    pub verify: Option<String>,
+    pub verify: Option<Verify>,
     /// Optional pre-flight baseline command. When present, the scheduler runs
     /// this command before dispatching the node, captures its stdout (trimmed
     /// of trailing whitespace and capped at 4 KB), and exposes it to the
@@ -85,10 +87,42 @@ fn default_transport() -> String {
     "http".to_string()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelRef {
     pub name: String,
     pub paid: bool,
+}
+
+/// A verification seam for a node's claimed success (spec-37).
+///
+/// - `Shell(cmd)` is today's behaviour, unchanged: run `cmd` in the DAG's
+///   project_root with the same cwd/env/timeout discipline as a `shell`
+///   node, gate on its exit status.
+/// - `Critic { prompt, models }` dispatches `prompt` through `&dyn Worker`
+///   — the same trait, retry and model-fallback machinery a normal node
+///   uses, never a subprocess — and parses the reply for a leading `PASS`
+///   or `FAIL` token. Anything else (unparseable reply, worker error,
+///   timeout, exhausted fallbacks, empty reply) is a FAIL; there is no
+///   input that produces a silent pass (C4, G4).
+/// - `All(arms)` requires every arm to pass. Evaluation short-circuits on
+///   the first failure, in author order (C6).
+///
+/// `#[serde(untagged)]` is what makes a bare JSON/TOML string deserialize
+/// as `Shell` — the exact wire shape `Node.verify: Option<String>` used
+/// before spec-37 (C2). This is a requirement, not an accident: `Node` is
+/// serialized into `RunMeta.dag_json` in every vault and authored as TOML
+/// in `src/workflow/templates/`, so a shape that cannot read the old form
+/// breaks every existing vault and template (see `docs/FINDINGS.md`, and
+/// `tests/fixtures/legacy_dag/` for the hash-pinned proof, C8).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Verify {
+    Shell(String),
+    Critic {
+        prompt: String,
+        models: Vec<ModelRef>,
+    },
+    All(Vec<Verify>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

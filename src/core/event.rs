@@ -48,6 +48,14 @@ pub enum Event {
     /// Emitted when verify fails after worker claimed success. Both facts are
     /// visible: the worker's claim and the verification failure. Truncated to
     /// 8 KB per the truncation convention used for `NodeFailed`.
+    ///
+    /// `verify_output` carries the failure reason regardless of which
+    /// `Verify` arm produced it (spec-37, C5): a shell arm's combined
+    /// stdout+stderr, a critic's parsed reason (raw reply if unparseable —
+    /// fail-closed, C4), or an `All` arm's "arm N (kind) failed: <reason>"
+    /// wrapper naming which arm lost (C6). Same field, wider meaning, so a
+    /// downstream repair node's `{{node.output}}` interpolation keeps
+    /// working unchanged for every `Verify` kind.
     NodeVerifyFailed {
         node_id: String,
         worker_claim: String,

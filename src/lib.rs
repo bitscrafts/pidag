@@ -21,7 +21,7 @@ pub use core::config;
 pub use core::selfexe::self_exe;
 pub use core::{
     CompositeSink, Config, Dag, Event, EventSink, JsonlSink, McpCallConfig, ModelRef, ModelsConfig,
-    Node, PidagError, RedbSink, RetryPolicy, SddConfig, VecSink,
+    Node, PidagError, RedbSink, RetryPolicy, SddConfig, VecSink, Verify,
 }; // Re-export the config module for backward compatibility (e.g., config::ENV_DEFAULT_MODEL)
 
 // Re-export scheduler and store types

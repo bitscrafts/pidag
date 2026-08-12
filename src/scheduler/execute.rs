@@ -5,11 +5,13 @@
 //! never need to poll.
 
 use super::{Inner, NodeState, NodeStatus, RunReport, Scheduler};
-use crate::core::dag::{Dag, Node};
+use crate::core::dag::{Dag, ModelRef, Node, Verify};
 use crate::core::error::PidagError;
 use crate::core::event::{Event, EventSink};
 use crate::worker::{Worker, WorkerOutput};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::future::Future;
+use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::{
     Arc,
@@ -36,6 +38,13 @@ pub enum DispatchEvent {
     /// silently discarded. Making it a variant forces the consumer to say so
     /// explicitly rather than losing it by omission.
     RetryExhausted { model: String },
+    /// A `Verify::Critic` arm was dispatched to a worker (spec-37, C10). Only
+    /// pushed once the paid-model gate has cleared and a real dispatch is
+    /// about to happen — never for a critic skipped by `allow_paid` (C7) or
+    /// short-circuited by an earlier `All` arm (C6b) — so its presence in
+    /// the event log means a verification step actually spent a model call,
+    /// not just that one was configured.
+    CriticDispatched { model: String },
 }
 
 impl Scheduler {
@@ -443,6 +452,18 @@ impl Scheduler {
                             // discarded it too. Recorded here so the omission is
                             // a decision rather than a catch-all swallowing it.
                         }
+                        DispatchEvent::CriticDispatched { model } => {
+                            // C10: a critic dispatch is visible in the event
+                            // log like any other model call, distinguishable
+                            // from the producing node's own dispatch via the
+                            // "::verify" suffix on node_id.
+                            tx.send(Event::NodeDispatched {
+                                node_id: format!("{node_id}::verify"),
+                                model,
+                                attempt: 1,
+                            })
+                            .ok();
+                        }
                     }
                 }
 
@@ -834,15 +855,18 @@ impl Scheduler {
                         final_state.attempts = attempt;
                         final_state.output = Some(output.output.clone());
                         // Apply verify check (V1, V5: must verify before marking Done)
-                        let (updated_state, vf) = Self::apply_verify_check(
+                        let (updated_state, vf, critic_events) = Self::apply_verify_check(
                             node,
                             final_state,
                             &output.output,
                             verify_pre_token.as_deref(),
+                            worker,
+                            allow_paid,
                         )
                         .await;
                         final_state = updated_state;
                         verify_failed = vf;
+                        events.extend(critic_events);
                         return (final_state, None, events, last_attempt, verify_failed);
                     } else {
                         // Track failure output for final state
@@ -923,15 +947,18 @@ impl Scheduler {
                     final_state.attempts = attempt;
                     final_state.output = Some(output.output.clone());
                     // Apply verify check (V1, V5: must verify before marking Done)
-                    let (updated_state, vf) = Self::apply_verify_check(
+                    let (updated_state, vf, critic_events) = Self::apply_verify_check(
                         node,
                         final_state,
                         &output.output,
                         verify_pre_token.as_deref(),
+                        worker,
+                        allow_paid,
                     )
                     .await;
                     final_state = updated_state;
                     verify_failed = vf;
+                    events.extend(critic_events);
                     return (
                         final_state,
                         Some(model.name.clone()),
@@ -1125,30 +1152,48 @@ impl Scheduler {
 
     /// Apply verify check to a node that succeeded. If node.verify is set and
     /// verify fails, mutates state to Failed and uses verify output as the artifact.
-    /// Returns (state, verify_failed_flag). Called just before returning from
-    /// dispatch_node for Done states. The flag is used to emit the correct event.
-    /// verify_pre_token is the captured stdout from verify_pre (if present), which is
-    /// exposed to verify as the PIDAG_VERIFY_PRE environment variable.
+    /// Returns (state, verify_failed_flag, critic_events). Called just before
+    /// returning from dispatch_node for Done states. The flag is used to emit
+    /// the correct event. verify_pre_token is the captured stdout from
+    /// verify_pre (if present), which is exposed to verify as the
+    /// PIDAG_VERIFY_PRE environment variable. `worker`/`allow_paid` are
+    /// threaded through so a `Verify::Critic` arm can dispatch through the
+    /// same `&dyn Worker` and paid-model gate as any other node (spec-37,
+    /// C3, C7) -- `apply_verify_check` previously had no worker handle at
+    /// all, which is exactly what made a critic verify unreachable before
+    /// this spec.
     async fn apply_verify_check(
         node: &Node,
         mut state: NodeState,
         worker_output: &str,
         verify_pre_token: Option<&str>,
-    ) -> (NodeState, bool) {
-        if let Some(ref verify_cmd) = node.verify {
-            // Use node.timeout if set, otherwise 5s (RealShellWorker default)
-            let timeout = node.timeout.unwrap_or_else(|| Duration::from_secs(5));
-            let (verify_success, verify_output) =
-                Self::run_verify(verify_cmd, timeout, verify_pre_token).await;
+        worker: &dyn Worker,
+        allow_paid: bool,
+    ) -> (NodeState, bool, Vec<DispatchEvent>) {
+        let mut events = Vec::new();
+        if let Some(ref verify) = node.verify {
+            let result = Self::eval_verify(
+                verify,
+                node,
+                worker_output,
+                verify_pre_token,
+                worker,
+                allow_paid,
+                &mut events,
+            )
+            .await;
 
-            if !verify_success {
-                // Verify failed: change state to Failed, use verify output as artifact
+            if let Err(reason) = result {
+                // Verify failed: change state to Failed, use the reason as
+                // the artifact. Store both facts: worker_output and reason.
+                // Format: "worker: <worker_output>\nverify: <reason>"
+                // Truncate to 8 KB like NodeFailed. Same convention for
+                // every `Verify` arm (Shell/Critic/All) -- see C5's note on
+                // event.rs -- so this is byte-identical to the pre-spec-37
+                // Shell-only formatting when `verify` is `Verify::Shell` (N1).
                 state.state = NodeStatus::Failed;
-                // Store both facts: worker_output and verify_output
-                // Format: "worker: <worker_output>\nverify: <verify_output>"
-                // Truncate to 8 KB like NodeFailed
                 const MAX_ERROR_LEN: usize = 8192;
-                let combined = format!("worker: {}\nverify: {}", worker_output, verify_output);
+                let combined = format!("worker: {}\nverify: {}", worker_output, reason);
                 if combined.len() > MAX_ERROR_LEN {
                     let truncated = Self::truncate_at_char_boundary(&combined, MAX_ERROR_LEN);
                     state.output = Some(format!(
@@ -1159,10 +1204,219 @@ impl Scheduler {
                 } else {
                     state.output = Some(combined);
                 }
-                return (state, true);
+                return (state, true, events);
             }
         }
-        (state, false)
+        (state, false, events)
+    }
+
+    /// Evaluate one `Verify` arm. `Ok(())` is a pass; `Err(reason)` is a
+    /// fail with a human-readable cause. Boxed/pinned because `All` recurses
+    /// into this same function and a plain `async fn` cannot call itself
+    /// (the compiler cannot compute an infinite-size future); this is the
+    /// standard shape for recursive async in Rust and adds no dependency
+    /// (N3).
+    fn eval_verify<'a>(
+        verify: &'a Verify,
+        node: &'a Node,
+        worker_output: &'a str,
+        verify_pre_token: Option<&'a str>,
+        worker: &'a dyn Worker,
+        allow_paid: bool,
+        events: &'a mut Vec<DispatchEvent>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            match verify {
+                Verify::Shell(cmd) => {
+                    // Unchanged from pre-spec-37: same command, same
+                    // timeout/env discipline, same (bool, String) shape (N1).
+                    let timeout = node.timeout.unwrap_or_else(|| Duration::from_secs(5));
+                    let (ok, output) = Self::run_verify(cmd, timeout, verify_pre_token).await;
+                    if ok { Ok(()) } else { Err(output) }
+                }
+                Verify::Critic { prompt, models } => {
+                    Self::eval_critic(
+                        node,
+                        prompt,
+                        models,
+                        worker_output,
+                        worker,
+                        allow_paid,
+                        events,
+                    )
+                    .await
+                }
+                Verify::All(arms) => {
+                    // C6: every arm must pass; short-circuit on the first
+                    // failure (C6b) so a free shell check that already
+                    // failed never triggers a paid critic dispatch. The
+                    // reason names which arm failed (C6, error-handling
+                    // expectations).
+                    for (i, arm) in arms.iter().enumerate() {
+                        if let Err(reason) = Self::eval_verify(
+                            arm,
+                            node,
+                            worker_output,
+                            verify_pre_token,
+                            worker,
+                            allow_paid,
+                            events,
+                        )
+                        .await
+                        {
+                            let kind = match arm {
+                                Verify::Shell(_) => "shell",
+                                Verify::Critic { .. } => "critic",
+                                Verify::All(_) => "all",
+                            };
+                            return Err(format!("arm {i} ({kind}) failed: {reason}"));
+                        }
+                    }
+                    Ok(())
+                }
+            }
+        })
+    }
+
+    /// Dispatch a `Verify::Critic` arm through `&dyn Worker` and judge the
+    /// reply. Fail-closed throughout (G4): the only path to `Ok(())` is a
+    /// worker reply whose trimmed text starts with a `PASS` token; every
+    /// other outcome -- unparseable reply, empty reply, worker `Err`,
+    /// exhausted fallbacks, a timeout, or the paid-model gate blocking every
+    /// configured model -- is `Err(reason)` with a cause-naming reason
+    /// (error handling expectations).
+    async fn eval_critic(
+        node: &Node,
+        prompt_template: &str,
+        models: &[ModelRef],
+        worker_output: &str,
+        worker: &dyn Worker,
+        allow_paid: bool,
+        events: &mut Vec<DispatchEvent>,
+    ) -> Result<(), String> {
+        // C7: a critic whose models are all paid is subject to the same
+        // allow_paid gate as any other dispatch, and must say so explicitly
+        // rather than fail with a generic message -- it is a configuration
+        // problem, not a verification result. Checked BEFORE dispatch so a
+        // blocked critic is provably never dispatched (no worker call, no
+        // CriticDispatched event).
+        if !models.is_empty() && !models.iter().any(|m| !m.paid || allow_paid) {
+            return Err(
+                "critic blocked: allow_paid is disabled and every configured critic model is paid"
+                    .to_string(),
+            );
+        }
+
+        // C3b: the producing node's own output is available to the critic
+        // prompt via the spec-29 interpolation already built -- reused
+        // as-is here (`interpolate_outputs`), keyed by this node's own id,
+        // since at verify time the worker output exists but has not yet
+        // been recorded in the scheduler's node_state map.
+        let mut self_output = HashMap::new();
+        self_output.insert(
+            node.id.clone(),
+            NodeState {
+                node_id: node.id.clone(),
+                state: NodeStatus::Done,
+                model: None,
+                attempts: 0,
+                output: Some(worker_output.to_string()),
+            },
+        );
+        let critic_prompt = Self::interpolate_outputs(prompt_template, &self_output);
+
+        // C3: dispatch through the same Worker trait, retry and
+        // model-fallback machinery a normal node uses -- reuse dispatch_node
+        // itself rather than duplicating that machinery. The synthetic
+        // critic node has `verify: None`, so this cannot recurse further.
+        let critic_node = Node {
+            id: format!("{}::verify", node.id),
+            prompt: critic_prompt,
+            depends_on: Vec::new(),
+            models: models.to_vec(),
+            retry: node.retry.clone(),
+            validate: None,
+            node_type: None,
+            gate: None,
+            timeout: node.timeout,
+            mcp_call: None,
+            after: Vec::new(),
+            verify: None,
+            verify_pre: None,
+        };
+
+        // C10: record the spend before dispatch, once the allow_paid gate
+        // above has cleared, so verification cost is visible in the event
+        // log even when the critic itself fails.
+        if let Some(first_model) = models.iter().find(|m| !m.paid || allow_paid) {
+            events.push(DispatchEvent::CriticDispatched {
+                model: first_model.name.clone(),
+            });
+        }
+
+        let (state, _model_used, sub_events, _attempt, _verify_failed) =
+            Self::dispatch_node(&critic_node, worker, allow_paid).await;
+        events.extend(sub_events);
+
+        match state.state {
+            NodeStatus::Done => {
+                // C4: fail-closed verdict parsing. Anything that is not a
+                // leading PASS/FAIL token -- including an empty reply -- is
+                // a FAIL with the raw reply preserved as the reason.
+                let reply = state.output.unwrap_or_default();
+                let (passed, reason) = Self::parse_critic_verdict(&reply);
+                if passed { Ok(()) } else { Err(reason) }
+            }
+            _ => {
+                // Worker error, exhausted fallbacks, or a node-level
+                // timeout: dispatch_node already classified this as Failed.
+                // Fail closed here too (C4e) -- never Done.
+                let detail = state
+                    .output
+                    .unwrap_or_else(|| "critic worker produced no output".to_string());
+                Err(format!("critic dispatch failed: {detail}"))
+            }
+        }
+    }
+
+    /// Parse a critic's reply into (passed, reason). The accepted form is
+    /// narrow and specified: a leading `PASS` or `FAIL` token, optionally
+    /// followed by a separator (whitespace/`-`/`:`) and a reason. Anything
+    /// that does not start with one of those two tokens -- including a
+    /// reply that merely *contains* "PASS" somewhere, e.g. "this does not
+    /// PASS" -- is treated as unparseable and fails closed with the raw
+    /// reply as the reason (C4c, C4d). This is the guard the naive
+    /// `reply.contains("PASS")` implementation fails: that check reads
+    /// "this does not PASS" as a pass, laundering an unverified result as a
+    /// verified one (G4).
+    fn parse_critic_verdict(reply: &str) -> (bool, String) {
+        let trimmed = reply.trim();
+        for (token, passed) in [("PASS", true), ("FAIL", false)] {
+            if let Some(rest) = trimmed.strip_prefix(token) {
+                // Require a word boundary after the token so "PASSED" or
+                // "FAILURE" don't spuriously match a bare PASS/FAIL token.
+                let boundary_ok = rest
+                    .chars()
+                    .next()
+                    .map(|c| !c.is_alphanumeric())
+                    .unwrap_or(true);
+                if boundary_ok {
+                    let reason = rest
+                        .trim_start_matches(|c: char| c.is_whitespace() || c == '-' || c == ':')
+                        .trim()
+                        .to_string();
+                    let reason = if reason.is_empty() {
+                        trimmed.to_string()
+                    } else {
+                        reason
+                    };
+                    return (passed, reason);
+                }
+            }
+        }
+        // No leading PASS/FAIL token (including an empty reply): fail
+        // closed, raw reply preserved as the reason (C4c, G4).
+        (false, trimmed.to_string())
     }
 
     /// Run verify_pre before dispatch to capture a baseline token.

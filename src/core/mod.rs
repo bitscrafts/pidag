@@ -8,6 +8,6 @@ pub mod selfexe;
 
 // Re-export public types for convenient access
 pub use config::{Config, ModelsConfig, SddConfig};
-pub use dag::{Dag, McpCallConfig, ModelRef, Node, RetryPolicy};
+pub use dag::{Dag, McpCallConfig, ModelRef, Node, RetryPolicy, Verify};
 pub use error::PidagError;
 pub use event::{CompositeSink, Event, EventSink, JsonlSink, RedbSink, VecSink};
