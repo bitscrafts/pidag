@@ -1,0 +1,20 @@
+{
+  "provider": "deepseek",
+  "model": "deepseek-chat",
+  "tools": ["read", "bash", "edit", "write", "grep", "find", "ls"],
+  "maxToolIterations": 50,
+  "requestTimeoutSecs": 300,
+  "skillsDir": "/root/.pi/agent/skills",
+  "skills": [
+    "agent-memory",
+    "pidag",
+    "rust-specialist",
+    "python-specialist",
+    "doc-organizer",
+    "skill-builder",
+    "spec-generator",
+    "handoff-generator",
+    "validate-exit-criteria",
+    "quality-gate"
+  ]
+}

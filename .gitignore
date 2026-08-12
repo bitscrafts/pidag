@@ -1,0 +1,17 @@
+# Build artifacts
+/target
+
+# Runtime state (pidag vault, queue state, coverage/split output, locks)
+/.pidag
+
+# Session scratch / handoff envelopes / design notes (transient)
+/_tmp
+
+# OS / editor cruft
+.DS_Store
+*.swp
+*.swo
+
+# Logs (auto-driver + cron)
+*.log
+/var/log/pidag-auto.log

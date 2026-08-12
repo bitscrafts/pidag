@@ -1,0 +1,155 @@
+# syntax=docker/dockerfile:1
+#
+# pidag + pi_agent_rust container for isolated SDD orchestration on lnx.
+#
+# Build with: podman build -t pidag-runner .
+# Run with:   podman-compose up -d
+#
+# Key design:
+# - pi is the agent (not Claude Code)
+# - Skills in /root/.pi/agent/skills/
+# - /projects/.pi symlinks to /root/.pi for project-local access
+
+# ---------------------------------------------------------------------------
+# Stage 1: Build pidag and pi
+# ---------------------------------------------------------------------------
+FROM rust:1.95-slim AS builder
+
+WORKDIR /build
+
+# Build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config \
+    libssl-dev \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+# --- Build pidag ---
+COPY pidag/Cargo.toml ./pidag/
+COPY pidag/src ./pidag/src/
+RUN find pidag/src -name "*.rs" -exec touch {} +
+
+WORKDIR /build/pidag
+RUN cargo build --release
+
+# --- Build pi (pi_agent_rust) ---
+WORKDIR /build
+
+COPY pi_agent_rust/Cargo.toml pi_agent_rust/Cargo.lock ./pi_agent_rust/
+COPY pi_agent_rust/build.rs ./pi_agent_rust/
+COPY pi_agent_rust/docs ./pi_agent_rust/docs/
+COPY pi_agent_rust/CHANGELOG.md ./pi_agent_rust/
+COPY pi_agent_rust/benches ./pi_agent_rust/benches/
+COPY pi_agent_rust/legacy_pi_mono_code ./pi_agent_rust/legacy_pi_mono_code/
+COPY pi_agent_rust/src ./pi_agent_rust/src/
+
+WORKDIR /build/pi_agent_rust
+RUN cargo build --release --bin pi
+
+# ---------------------------------------------------------------------------
+# Stage 2: Runtime (uses rust:slim for cargo/clippy/rustfmt availability)
+# ---------------------------------------------------------------------------
+FROM rust:1.95-slim AS runtime
+
+# Runtime dependencies + clippy/rustfmt components + redbcli for vault inspection
+RUN rustup component add clippy rustfmt && \
+    cargo install redbcli && \
+    apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libssl3 \
+    curl \
+    jq \
+    git \
+    gh \
+    neovim \
+    netcat-openbsd \
+    python3 \
+    python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Diagnostics tooling (spec-28). Deliberately a SEPARATE layer from the
+# rustup/redbcli block above: editing that block's command string invalidates
+# it and forces a redbcli source recompile on every tooling adjustment. The
+# cache cleanup runs inside this same RUN, so no apt cache is committed.
+#
+# procps is load-bearing, not convenience: diagnosing the 2026-08-10 process
+# table exhaustion and measuring PiBackend pool reuse both require ps/pgrep.
+# Without it those tasks cannot be run at all.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    procps \
+    psmisc \
+    lsof \
+    iproute2 \
+    file \
+    tree \
+    bc \
+    unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install uv (fast Python package manager)
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:$PATH"
+
+# Copy binaries
+COPY --from=builder /build/pidag/target/release/pidag /usr/local/bin/
+COPY --from=builder /build/pi_agent_rust/target/release/pi /usr/local/bin/
+
+# ---------------------------------------------------------------------------
+# Pi Agent Configuration (/root/.pi/agent/)
+# ---------------------------------------------------------------------------
+# Pi configuration directory
+RUN mkdir -p /root/.pi/agent/skills
+
+# Copy pi agent settings and models
+COPY resources/pi-agent/settings.json /root/.pi/agent/
+COPY resources/pi-agent/models.json /root/.pi/agent/
+
+# Copy pi skills
+COPY resources/pi-skills/ /root/.pi/agent/skills/
+RUN find /root/.pi/agent/skills -name "*.sh" -exec chmod +x {} \;
+
+# ---------------------------------------------------------------------------
+# Legacy scripts (copied but not primary - pi skills are preferred)
+# ---------------------------------------------------------------------------
+COPY scripts/ /usr/local/scripts/
+RUN chmod +x /usr/local/scripts/*.sh
+
+# ---------------------------------------------------------------------------
+# Projects directory
+# ---------------------------------------------------------------------------
+RUN mkdir -p /projects /usr/local/share
+
+# Copy AGENTS.md to static location (entrypoint copies to projects if needed)
+COPY resources/AGENTS.md /usr/local/share/
+
+# Entrypoint creates symlinks after volume mount
+COPY scripts/entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+VOLUME ["/projects"]
+
+# ---------------------------------------------------------------------------
+# Environment
+# ---------------------------------------------------------------------------
+# /projects/.local/bin FIRST - allows local builds to override image binaries
+ENV PATH="/projects/.local/bin:/usr/local/scripts:/root/.pi/agent/skills/pidag:/root/.pi/agent/skills/validate-exit-criteria:/root/.pi/agent/skills/quality-gate:/root/.pi/agent/skills/spec-generator:/root/.pi/agent/skills/handoff-generator:$PATH"
+# Agent-memory: use lnx IP for cross-network container communication
+ENV AGENT_MEMORY_URL="http://${MEMORY_HOST}:7420"
+ENV AGENT_MEMORY_TIMEOUT="30"
+ENV PI_PROVIDER="deepseek"
+ENV PI_MODEL="deepseek-chat"
+ENV PI_HTTP_REQUEST_TIMEOUT_SECS="120"
+
+WORKDIR /projects
+
+EXPOSE 4601
+
+# Healthcheck
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:4601/ || exit 1
+
+# Entrypoint creates symlinks after volume mount
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+
+# Default: run pidag ui
+CMD ["pidag", "ui", "--host", "0.0.0.0", "--port", "4601", "--project-root", "/projects"]

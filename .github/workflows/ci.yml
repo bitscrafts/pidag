@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Cuts target/ from ~26G to ~8.5G while keeping usable backtraces. Without it
+  # the runner runs out of disk linking ~46 test binaries.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+
+jobs:
+  gate:
+    name: quality gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: gate
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: cargo check
+        run: cargo check --workspace
+
+      # -p pidag, never --all-targets: the latter surfaces pre-existing
+      # test-file lints that are out of scope for this gate.
+      - name: cargo clippy
+        run: cargo clippy -p pidag -- -D warnings
+
+      # --no-fail-fast so one failing binary does not hide the other 45.
+      # A gate that truncates its own evidence is how a broken spec once
+      # got accepted here.
+      - name: cargo test
+        run: cargo test --workspace -j 2 --no-fail-fast
+
+  guards:
+    name: regression guards
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      # These encode defects that were invisible in review and cost real time.
+      # Each one is cheap to check and expensive to rediscover.
+      - name: no bare-name self-invocation
+        run: |
+          if grep -rn 'Command::new("pidag")' src/ --include='*.rs' \
+             | grep -v '^\s*//' | grep -v 'selfexe.rs'; then
+            echo "::error::resolves pidag via PATH; a stale install silently runs old code. Use self_exe()."
+            exit 1
+          fi
+
+      - name: no swallowed vault writes
+        run: |
+          if grep -c 'let _ = self' src/core/event.rs | grep -qv '^0$'; then
+            echo "::error::a discarded store result means a run can report success while its only record failed to write."
+            exit 1
+          fi
+
+      - name: no redb outside a blocking closure
+        run: |
+          if grep -nE 'async fn' -A3 src/store/redb_store.rs \
+             | grep -E 'begin_write\(|begin_read\(' \
+             | grep -v spawn_blocking; then
+            echo "::warning::possible redb primitive on the async runtime; see tests/blocking_offload_tests.rs"
+          fi
+
+      - name: specs declare a status
+        run: |
+          missing=$(grep -L '^\- \*\*Status\*\*' specs/*.md || true)
+          if [ -n "$missing" ]; then
+            echo "::warning::specs without a Status field: $missing"
+          fi
+
+  bench:
+    name: baseline (informational)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Zero model calls: the benchmark DAGs are shell nodes only, so this
+      # measures scheduler and store overhead and nothing else.
+      - name: scheduler benchmark
+        run: cargo bench --bench scheduler_bench 2>&1 | tail -40

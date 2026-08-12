@@ -1,0 +1,56 @@
+version: "3.8"
+
+services:
+  pidag:
+    build:
+      context: .
+      dockerfile: Containerfile
+    image: pidag-runner:latest
+    container_name: pidag-runner
+    # REQUIRED — reaps zombie processes (2026-08-11).
+    # entrypoint.sh ends with `exec "$@"`, so `pidag ui` becomes PID 1. pidag is not
+    # init-aware: when a `pidag run` process exits, its `pi`/`git`/`sh` children are
+    # reparented to PID 1 and never wait()ed, so they accumulate as zombies forever.
+    # Observed: 1797 zombies (800 `pi`) against a 2048 pids limit -> fork failures
+    # surfacing as "linking with cc failed", "pi exited with status: Some(1)" and hangs.
+    # `init: true` makes podman run catatonit as PID 1, which reaps adopted orphans.
+    # Equivalent for plain podman: `podman run --init ...`
+    init: true
+    # Safety net so a leak degrades gracefully instead of wedging the container.
+    pids_limit: 4096
+    ports:
+      - "4601:4601"
+    volumes:
+      # Projects persist across container restarts
+      - ./projects:/projects
+      # Mount pidag source for development (read-only)
+      # Structure: /opt/pidag-src/{Cargo.toml,src/,specs/,...}
+      - ./pidag:/opt/pidag-src:ro
+    env_file:
+      - .env
+    environment:
+      # API keys (source from .env file or host environment)
+      - NVIDIA_API_KEY=${NVIDIA_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
+      # agent-memory connection (use lnx IP for cross-network container communication)
+      - AGENT_MEMORY_URL=http://${MEMORY_HOST}:7420
+      - AGENT_MEMORY_TIMEOUT=30
+      # Default model: pidag uses nvidia/z-ai/glm-5.2 built-in; override via .env
+    extra_hosts:
+      # Enable container to reach host services (agent-memory on ports 7420, 7421)
+      - "host.containers.internal:host-gateway"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4601/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+# Optional: dedicated network for pidag + future services
+networks:
+  default:
+    name: pidag-network

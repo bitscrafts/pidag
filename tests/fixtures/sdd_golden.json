@@ -1,0 +1,225 @@
+{
+  "nodes": [
+    {
+      "id": "validate-baseline",
+      "prompt": "/validate.sh spec.md",
+      "depends_on": [],
+      "models": [],
+      "retry": {
+        "attempts": 1,
+        "backoff_ms": 0
+      },
+      "validate": null,
+      "node_type": "shell",
+      "gate": null,
+      "timeout": null,
+      "mcp_call": null,
+      "after": [],
+      "verify": null,
+      "verify_pre": null
+    },
+    {
+      "id": "implement-iter1",
+      "prompt": "Implement from scratch based on:\n\nTDD Contract:\nTest requirement\n\nArchitecture:\nTest architecture\n\nGuardrails:\nTest guardrails\n\nProject root: /project",
+      "depends_on": [],
+      "models": [
+        {
+          "name": "nvidia/z-ai/glm-5.2",
+          "paid": false
+        }
+      ],
+      "retry": {
+        "attempts": 1,
+        "backoff_ms": 0
+      },
+      "validate": null,
+      "node_type": null,
+      "gate": null,
+      "timeout": null,
+      "mcp_call": null,
+      "after": [],
+      "verify": "test \"$( ( git status --porcelain; git diff; git diff --cached; git ls-files -o --exclude-standard -z | xargs -0 -r sha256sum ) | sha256sum )\" != \"$PIDAG_VERIFY_PRE\"",
+      "verify_pre": "( git status --porcelain; git diff; git diff --cached; git ls-files -o --exclude-standard -z | xargs -0 -r sha256sum ) | sha256sum"
+    },
+    {
+      "id": "quality-gate-1",
+      "prompt": "/quality-gate.sh /project",
+      "depends_on": [],
+      "models": [],
+      "retry": {
+        "attempts": 1,
+        "backoff_ms": 0
+      },
+      "validate": null,
+      "node_type": "shell",
+      "gate": null,
+      "timeout": null,
+      "mcp_call": null,
+      "after": [
+        "implement-iter1"
+      ],
+      "verify": null,
+      "verify_pre": null
+    },
+    {
+      "id": "validate-iter1",
+      "prompt": "/validate.sh spec.md",
+      "depends_on": [],
+      "models": [],
+      "retry": {
+        "attempts": 1,
+        "backoff_ms": 0
+      },
+      "validate": null,
+      "node_type": "shell",
+      "gate": null,
+      "timeout": null,
+      "mcp_call": null,
+      "after": [
+        "implement-iter1",
+        "quality-gate-1"
+      ],
+      "verify": null,
+      "verify_pre": null
+    },
+    {
+      "id": "implement-iter2",
+      "prompt": "Fix the failures reported in:\n{{validate-iter1.output}}\n\nGuardrails:\nTest guardrails\n\nProject root: /project",
+      "depends_on": [
+        "validate-iter1"
+      ],
+      "models": [
+        {
+          "name": "nvidia/z-ai/glm-5.2",
+          "paid": false
+        }
+      ],
+      "retry": {
+        "attempts": 1,
+        "backoff_ms": 0
+      },
+      "validate": null,
+      "node_type": null,
+      "gate": "validate-iter1:fail",
+      "timeout": null,
+      "mcp_call": null,
+      "after": [],
+      "verify": "test \"$( ( git status --porcelain; git diff; git diff --cached; git ls-files -o --exclude-standard -z | xargs -0 -r sha256sum ) | sha256sum )\" != \"$PIDAG_VERIFY_PRE\"",
+      "verify_pre": "( git status --porcelain; git diff; git diff --cached; git ls-files -o --exclude-standard -z | xargs -0 -r sha256sum ) | sha256sum"
+    },
+    {
+      "id": "quality-gate-2",
+      "prompt": "/quality-gate.sh /project",
+      "depends_on": [],
+      "models": [],
+      "retry": {
+        "attempts": 1,
+        "backoff_ms": 0
+      },
+      "validate": null,
+      "node_type": "shell",
+      "gate": null,
+      "timeout": null,
+      "mcp_call": null,
+      "after": [
+        "implement-iter2"
+      ],
+      "verify": null,
+      "verify_pre": null
+    },
+    {
+      "id": "validate-iter2",
+      "prompt": "/validate.sh spec.md",
+      "depends_on": [],
+      "models": [],
+      "retry": {
+        "attempts": 1,
+        "backoff_ms": 0
+      },
+      "validate": null,
+      "node_type": "shell",
+      "gate": null,
+      "timeout": null,
+      "mcp_call": null,
+      "after": [
+        "implement-iter2",
+        "quality-gate-2"
+      ],
+      "verify": null,
+      "verify_pre": null
+    },
+    {
+      "id": "implement-iter3",
+      "prompt": "Fix the failures reported in:\n{{validate-iter2.output}}\n\nGuardrails:\nTest guardrails\n\nProject root: /project",
+      "depends_on": [
+        "validate-iter2"
+      ],
+      "models": [
+        {
+          "name": "nvidia/z-ai/glm-5.2",
+          "paid": false
+        },
+        {
+          "name": "nvidia/meta/llama-3.3-70b-instruct",
+          "paid": true
+        }
+      ],
+      "retry": {
+        "attempts": 1,
+        "backoff_ms": 0
+      },
+      "validate": null,
+      "node_type": null,
+      "gate": "validate-iter2:fail",
+      "timeout": null,
+      "mcp_call": null,
+      "after": [],
+      "verify": "test \"$( ( git status --porcelain; git diff; git diff --cached; git ls-files -o --exclude-standard -z | xargs -0 -r sha256sum ) | sha256sum )\" != \"$PIDAG_VERIFY_PRE\"",
+      "verify_pre": "( git status --porcelain; git diff; git diff --cached; git ls-files -o --exclude-standard -z | xargs -0 -r sha256sum ) | sha256sum"
+    },
+    {
+      "id": "quality-gate-3",
+      "prompt": "/quality-gate.sh /project",
+      "depends_on": [],
+      "models": [],
+      "retry": {
+        "attempts": 1,
+        "backoff_ms": 0
+      },
+      "validate": null,
+      "node_type": "shell",
+      "gate": null,
+      "timeout": null,
+      "mcp_call": null,
+      "after": [
+        "implement-iter3"
+      ],
+      "verify": null,
+      "verify_pre": null
+    },
+    {
+      "id": "validate-iter3",
+      "prompt": "/validate.sh spec.md",
+      "depends_on": [],
+      "models": [],
+      "retry": {
+        "attempts": 1,
+        "backoff_ms": 0
+      },
+      "validate": null,
+      "node_type": "shell",
+      "gate": null,
+      "timeout": null,
+      "mcp_call": null,
+      "after": [
+        "implement-iter3",
+        "quality-gate-3"
+      ],
+      "verify": null,
+      "verify_pre": null
+    }
+  ],
+  "metadata": {
+    "workflow": "sdd"
+  }
+}

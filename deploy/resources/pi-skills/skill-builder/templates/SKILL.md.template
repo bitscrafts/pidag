@@ -1,0 +1,45 @@
+---
+name: {{SKILL_NAME}}
+description: >
+  {{DESCRIPTION}}
+version: 1.0.0
+allowed-tools: [bash]
+---
+
+# {{SKILL_NAME}}
+
+## Usage
+
+```bash
+pi --skill {{SKILL_NAME}} <command> [args...]
+```
+
+## Commands
+
+### example
+Description of what this command does.
+
+```bash
+pi --skill {{SKILL_NAME}} example arg1 arg2
+```
+
+## Parameters
+
+- `arg1`: Description of first argument
+- `arg2`: Description of second argument (optional)
+
+## Output
+
+Returns JSON with command results:
+
+```json
+{
+  "result": "example output",
+  "status": "success"
+}
+```
+
+## Exit Codes
+
+- 0: Success
+- 1: Error (see error message in output)

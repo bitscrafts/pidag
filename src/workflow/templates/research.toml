@@ -1,0 +1,29 @@
+name        = "research"
+description = "Fan-out investigation nodes with synthesis and validation"
+
+[[nodes]]
+id      = "investigate-1"
+prompt  = "Investigate research topic 1:\n{prompt.research}\n\nProject root: {project_root}"
+models  = "{models.worker(1)}"
+
+[[nodes]]
+id      = "investigate-2"
+prompt  = "Investigate research topic 2:\n{prompt.research}\n\nProject root: {project_root}"
+models  = "{models.worker(1)}"
+
+[[nodes]]
+id      = "investigate-3"
+prompt  = "Investigate research topic 3:\n{prompt.research}\n\nProject root: {project_root}"
+models  = "{models.worker(1)}"
+
+[[nodes]]
+id         = "synthesize"
+prompt     = "Synthesize the findings from the three investigations:\n\nInvestigation 1:\n{{investigate-1.output}}\n\nInvestigation 2:\n{{investigate-2.output}}\n\nInvestigation 3:\n{{investigate-3.output}}\n\nProject root: {project_root}"
+depends_on = ["investigate-1", "investigate-2", "investigate-3"]
+models     = "{models.worker(1)}"
+
+[[nodes]]
+id      = "validate-research"
+type    = "shell"
+command = "{validate_script} {spec_path}"
+after   = ["synthesize"]

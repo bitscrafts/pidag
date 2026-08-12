@@ -1,0 +1,42 @@
+name        = "sdd"
+description = "Spec-driven implement -> quality-gate -> validate recovery loop"
+iterations  = 3
+
+[[nodes]]
+id      = "validate-baseline"
+type    = "shell"
+command = "{validate_script} {spec_path}"
+
+[[nodes]]
+id         = "implement-iter1"
+prompt     = "Implement from scratch based on:\n\nTDD Contract:\n{prompt.tdd_contract}\n\nArchitecture:\n{prompt.architecture}\n\nGuardrails:\n{prompt.guardrails}\n\nProject root: {project_root}"
+models     = "{models.worker(1)}"
+verify_pre = "( git status --porcelain; git diff; git diff --cached; git ls-files -o --exclude-standard -z | xargs -0 -r sha256sum ) | sha256sum"
+verify     = "test \"$( ( git status --porcelain; git diff; git diff --cached; git ls-files -o --exclude-standard -z | xargs -0 -r sha256sum ) | sha256sum )\" != \"$PIDAG_VERIFY_PRE\""
+
+[[repeat]]
+start = 2
+
+  [[repeat.nodes]]
+  id         = "implement-iter{n}"
+  prompt     = "Fix the failures reported in:\n{{validate-iter{n-1}.output}}\n\nGuardrails:\n{prompt.guardrails}\n\nProject root: {project_root}"
+  models     = "{models.worker(n)}"
+  depends_on = ["validate-iter{n-1}"]
+  gate       = "validate-iter{n-1}:fail"
+  verify_pre = "( git status --porcelain; git diff; git diff --cached; git ls-files -o --exclude-standard -z | xargs -0 -r sha256sum ) | sha256sum"
+  verify     = "test \"$( ( git status --porcelain; git diff; git diff --cached; git ls-files -o --exclude-standard -z | xargs -0 -r sha256sum ) | sha256sum )\" != \"$PIDAG_VERIFY_PRE\""
+
+[[repeat]]
+start = 1
+
+  [[repeat.nodes]]
+  id      = "quality-gate-{n}"
+  type    = "shell"
+  command = "{quality_gate_script} {project_root}"
+  after   = ["implement-iter{n}"]
+
+  [[repeat.nodes]]
+  id      = "validate-iter{n}"
+  type    = "shell"
+  command = "{validate_script} {spec_path}"
+  after   = ["implement-iter{n}", "quality-gate-{n}"]

@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+#
+# {{SKILL_NAME}} — {{DESCRIPTION}}
+#
+# Usage:
+#   run.sh <command> [args...]
+#
+set -euo pipefail
+
+COMMAND="${1:-}"
+
+if [ -z "$COMMAND" ]; then
+    echo '{"error": "command required"}' >&2
+    exit 1
+fi
+
+shift
+
+case "$COMMAND" in
+    example)
+        ARG1="${1:-}"
+        if [ -z "$ARG1" ]; then
+            echo '{"error": "arg1 required"}' >&2
+            exit 1
+        fi
+        echo "{\"result\": \"processed: $ARG1\"}"
+        ;;
+
+    *)
+        echo "{\"error\": \"unknown command: $COMMAND\"}" >&2
+        exit 1
+        ;;
+esac

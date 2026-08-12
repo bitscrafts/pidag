@@ -1,0 +1,74 @@
+{
+  "nodes": [
+    {
+      "id": "validate-baseline",
+      "prompt": "bash ~/.claude/skills/loop-engineer/scripts/validate-exit-criteria.sh /projects/my-app/specs/01-feature.md .",
+      "depends_on": [],
+      "models": [],
+      "retry": {
+        "attempts": 1,
+        "backoff_ms": 0
+      },
+      "validate": null,
+      "node_type": "shell",
+      "gate": null,
+      "timeout": null,
+      "mcp_call": null
+    },
+    {
+      "id": "implement-iter1",
+      "prompt": "Implement from scratch based on:\n\nTDD Contract:\n[table from spec]\n\nArchitecture:\n[diagram from spec]\n\nGuardrails:\n[guardrails from spec]\n\nProject root: .",
+      "depends_on": [],
+      "models": [
+        {
+          "name": "nvidia/z-ai/glm-5.2",
+          "paid": false
+        }
+      ],
+      "retry": {
+        "attempts": 2,
+        "backoff_ms": 5000
+      },
+      "validate": null,
+      "node_type": null,
+      "gate": null,
+      "timeout": null,
+      "mcp_call": null
+    },
+    {
+      "id": "quality-gate-1",
+      "prompt": "bash ~/.claude/skills/rust-specialist/scripts/quality-gate.sh .",
+      "depends_on": ["implement-iter1"],
+      "models": [],
+      "retry": {
+        "attempts": 1,
+        "backoff_ms": 0
+      },
+      "validate": null,
+      "node_type": "shell",
+      "gate": null,
+      "timeout": null,
+      "mcp_call": null
+    },
+    {
+      "id": "validate-iter1",
+      "prompt": "bash ~/.claude/skills/loop-engineer/scripts/validate-exit-criteria.sh /projects/my-app/specs/01-feature.md .",
+      "depends_on": ["quality-gate-1"],
+      "models": [],
+      "retry": {
+        "attempts": 1,
+        "backoff_ms": 0
+      },
+      "validate": null,
+      "node_type": "shell",
+      "gate": null,
+      "timeout": null,
+      "mcp_call": null
+    }
+  ],
+  "metadata": {
+    "spec": "01-feature",
+    "project": "/projects/my-app",
+    "version": "1.0.0"
+  }
+}

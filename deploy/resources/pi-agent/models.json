@@ -1,0 +1,42 @@
+{
+  "_comment": "Model hierarchy for pidag SDD workflow",
+
+  "providers": {},
+
+  "planners": {
+    "_description": "Models for planning/architecture - try free first",
+    "free": [
+      {"provider": "nvidia", "model": "zhipuai/glm-5-plus", "note": "GLM 5.2 equivalent"},
+      {"provider": "moonshotai", "model": "kimi-k3", "note": "Kimi K3 for complex reasoning"}
+    ],
+    "paid": [
+      {"provider": "anthropic", "model": "claude-sonnet-4", "note": "Fallback for complex plans"}
+    ]
+  },
+
+  "workers": {
+    "_description": "Models for implementation - fast and capable",
+    "free": [
+      {"provider": "nvidia", "model": "deepseek-ai/deepseek-v3.2", "note": "DeepSeek V4 flash equivalent"},
+      {"provider": "google", "model": "gemini-2.5-flash", "note": "Gemini 3.6 flash equivalent"}
+    ],
+    "paid": [
+      {"provider": "deepseek", "model": "deepseek-chat", "note": "Direct DeepSeek API"}
+    ]
+  },
+
+  "avoid": [
+    "gpt-3.5-turbo",
+    "gemini-1.0-pro",
+    "llama-2-*",
+    "mistral-7b"
+  ],
+
+  "ollama_cloud": {
+    "_description": "Models from https://ollama.com/search?c=cloud",
+    "recommended": [
+      "glm5.2",
+      "kimi-k3"
+    ]
+  }
+}

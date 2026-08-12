@@ -1,0 +1,1507 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>pidag trace</title>
+<!-- vis-timeline (Gantt timeline view) loaded via CDN — no build step.
+     Standalone UMD bundle, zero dependencies. Used by the run-detail view
+     to render one horizontal line per DAG node with start→end bars. -->
+<script src="https://unpkg.com/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.js"></script>
+<link href="https://unpkg.com/vis-timeline@7.7.3/styles/vis-timeline-graph2d.min.css" rel="stylesheet">
+<!-- Nova Square font for the Gantt timeline bars (sci-fi monospace feel). -->
+<link href="https://fonts.googleapis.com/css2?family=Nova+Square&display=swap" rel="stylesheet">
+<style>
+/* Dark theme by default — the pidag UI has no auth, so it's local-only
+   (127.0.0.1). The dark theme matches the terminal aesthetic of pidag
+   itself and reduces eye strain for long-running DAG observation. */
+:root {
+  --bg: #0d1117;
+  --fg: #c9d1d9;
+  --accent: #58a6ff;
+  --green: #3fb950;
+  --red: #f85149;
+  --yellow: #d29922;
+  --gray: #6e7681;
+  --card: #161b22;
+  --border: #30363d;
+}
+/* Light theme — activated by body[data-theme="light"]. Persisted across
+   reloads via localStorage('pidag-theme'). Toggle button in the header. */
+body[data-theme="light"] {
+  --bg: #ffffff;
+  --fg: #24292f;
+  --accent: #0969da;
+  --green: #1a7f37;
+  --red: #cf222e;
+  --yellow: #9a6700;
+  --gray: #656d76;
+  --card: #f6f8fa;
+  --border: #d0d7de;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: -apple-system, "SF Mono", "Fira Code", "Cascadia Code", monospace;
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 14px;
+  line-height: 1.5;
+}
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code { background: var(--card); padding: 1px 4px; border-radius: 3px; font-size: 13px; }
+.header {
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+  z-index: 10;
+}
+.header h1 { margin: 0; font-size: 16px; font-weight: 500; }
+.header #poll-status { font-size: 12px; color: var(--gray); }
+.content { padding: 20px; max-width: 1200px; margin: 0 auto; }
+.content h2 { font-size: 15px; font-weight: 500; }
+.content h3 { font-size: 13px; font-weight: 500; color: var(--gray); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
+table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
+th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+th { color: var(--gray); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+tr:hover { background: var(--card); cursor: pointer; }
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 500;
+}
+.badge.done { background: rgba(63,185,80,0.2); color: var(--green); }
+.badge.failed { background: rgba(248,81,73,0.2); color: var(--red); }
+.badge.running { background: rgba(88,166,255,0.2); color: var(--accent); }
+.badge.pending { background: rgba(110,118,129,0.2); color: var(--gray); }
+.badge.blocked { background: rgba(110,118,129,0.2); color: var(--gray); }
+.badge.skipped { background: rgba(110,118,129,0.1); color: var(--gray); }
+.badge.retry { background: rgba(210,153,34,0.2); color: var(--yellow); }
+/* Trace waterfall: a vertical list of colored event blocks. Each block is
+   one event; clicking copies its detail to the clipboard. */
+.waterfall { display: flex; flex-direction: column; gap: 3px; margin: 12px 0 24px 0; }
+.event {
+  display: flex;
+  align-items: center;
+  padding: 6px 12px;
+  border-radius: 4px;
+  font-size: 13px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: border-color 0.1s;
+}
+.event:hover { border-color: var(--accent); }
+.event.dispatched { background: rgba(88,166,255,0.1); border-left: 3px solid var(--accent); }
+.event.done { background: rgba(63,185,80,0.1); border-left: 3px solid var(--green); }
+.event.failed { background: rgba(248,81,73,0.1); border-left: 3px solid var(--red); }
+.event.retry { background: rgba(210,153,34,0.1); border-left: 3px solid var(--yellow); }
+.event.fallback { background: rgba(210,153,34,0.1); border-left: 3px solid var(--yellow); }
+.event.blocked { background: rgba(110,118,129,0.1); border-left: 3px solid var(--gray); }
+.event.skipped { background: rgba(110,118,129,0.05); border-left: 3px solid var(--gray); }
+.event.submitted { background: rgba(110,118,129,0.05); border-left: 3px solid var(--gray); }
+.event.dag { background: rgba(110,118,129,0.05); border-left: 3px solid var(--gray); }
+.event .seq { color: var(--gray); width: 50px; flex-shrink: 0; }
+.event .type { width: 140px; font-weight: 500; flex-shrink: 0; }
+.event .detail { flex: 1; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.event .copy-hint { color: var(--gray); font-size: 11px; margin-left: 8px; opacity: 0; transition: opacity 0.1s; }
+.event:hover .copy-hint { opacity: 1; }
+/* Node cards: expandable to show output. The output is fetched on demand
+   from the artifacts endpoint (not yet implemented in v1; the card shows
+   state + model + attempt for now). */
+.node-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 14px;
+  margin-bottom: 6px;
+  cursor: pointer;
+  transition: border-color 0.1s;
+}
+.node-card:hover { border-color: var(--accent); }
+.node-card .node-header { display: flex; justify-content: space-between; align-items: center; }
+.node-card .node-meta { color: var(--gray); font-size: 12px; }
+.controls { display: flex; gap: 12px; align-items: center; margin-bottom: 16px; }
+.controls button {
+  background: var(--card);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  padding: 6px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  font-family: inherit;
+}
+.controls button:hover { border-color: var(--accent); }
+.controls select {
+  background: var(--card);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  padding: 6px;
+  border-radius: 4px;
+  font-size: 13px;
+  font-family: inherit;
+}
+.back-link { margin-bottom: 16px; display: inline-block; font-size: 13px; }
+.empty { color: var(--gray); padding: 40px 0; text-align: center; }
+.muted { color: var(--gray); }
+.toast {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  padding: 8px 14px;
+  border-radius: 4px;
+  font-size: 12px;
+  opacity: 0;
+  transition: opacity 0.2s;
+  pointer-events: none;
+}
+.toast.show { opacity: 1; }
+/* vis-timeline theme overrides — the library's own CSS uses a white
+   background by default; we override it to follow our theme variables so
+   the timeline matches the rest of the UI in both dark and light modes. */
+.vis-timeline {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.vis-time-axis .vis-text { color: var(--fg); }
+.vis-time-axis .vis-grid.vis-minor { border-color: var(--border); }
+.vis-time-axis .vis-grid.vis-major { border-color: var(--border); }
+.vis-current-time { background-color: var(--accent); }
+.vis-item {
+  border-color: var(--gray);
+  background-color: var(--card);
+  color: var(--fg);
+  /* Ensure very short bars (14ms, 32ms) are still visible and clickable.
+     Without a minimum width, a 14ms bar renders as ~0px and is invisible. */
+  min-width: 80px;
+  text-align: center;
+  /* Nova Square (sci-fi monospace feel) for Gantt bar labels — the elapsed
+     time and state text inside each bar. Small so it fits on narrow bars. */
+  font-family: "Nova Square", monospace;
+  font-size: 10px;
+  white-space: nowrap;
+}
+/* State-colored Gantt bars. The className is set per-item from the API. */
+.vis-item.done { background-color: var(--green); border-color: var(--green); color: #fff; }
+.vis-item.failed { background-color: var(--red); border-color: var(--red); color: #fff; }
+.vis-item.running { background-color: var(--accent); border-color: var(--accent); color: #fff; }
+.vis-item.blocked { background-color: var(--gray); border-color: var(--gray); color: #fff; }
+.vis-item.skipped { background-color: var(--gray); border-color: var(--gray); color: #fff; opacity: 0.5; }
+.vis-item.pending { background-color: var(--gray); border-color: var(--gray); color: #fff; }
+/* Pulsing animation for running nodes — draws the eye to in-flight work. */
+.vis-item.running .vis-item-overflow {
+  animation: pidag-pulse 1.5s infinite;
+}
+@keyframes pidag-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+/* Node detail panel — shown when a timeline bar is clicked. Slides in
+   from the right; click the close button or the backdrop to dismiss. */
+#node-detail {
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: 480px;
+  max-width: 90vw;
+  height: 100vh;
+  background: var(--bg);
+  border-left: 1px solid var(--border);
+  box-shadow: -4px 0 24px rgba(0,0,0,0.3);
+  padding: 16px 20px;
+  overflow-y: auto;
+  z-index: 20;
+  display: none;
+  box-sizing: border-box;
+}
+#node-detail.show { display: block; }
+#node-detail h3 { margin-top: 0; }
+#node-detail .detail-meta { color: var(--gray); font-size: 12px; margin-bottom: 12px; }
+#node-detail pre {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 10px;
+  overflow-x: auto;
+  font-size: 12px;
+  max-height: 60vh;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+#node-detail .close-btn {
+  background: var(--card);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  padding: 4px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+  float: right;
+}
+#node-detail .close-btn:hover { border-color: var(--accent); }
+#detail-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.3);
+  z-index: 19;
+  display: none;
+}
+#detail-backdrop.show { display: block; }
+#theme-toggle {
+  background: var(--card);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  padding: 4px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+  margin-left: 8px;
+}
+#theme-toggle:hover { border-color: var(--accent); }
+#timeline {
+  margin: 12px 0 24px 0;
+  min-height: 400px;
+}
+.timeline-section { margin-bottom: 24px; }
+.timeline-section .collapsible-toggle {
+  background: var(--card);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  padding: 4px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+  margin-left: 8px;
+}
+/* Project Overview: a grid of spec cards + a runs table. Each spec card
+   shows the title, an Exit Criteria progress bar, and a status badge.
+   Clicking a card opens #/spec/<name>. */
+.spec-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+  margin: 12px 0 24px 0;
+}
+.spec-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px 14px;
+  cursor: pointer;
+  transition: border-color 0.1s;
+}
+.spec-card:hover { border-color: var(--accent); }
+.spec-card .spec-title { font-weight: 500; font-size: 14px; margin-bottom: 8px; }
+.spec-card .spec-name { color: var(--gray); font-size: 11px; }
+.spec-card .progress-wrap { margin-top: 10px; }
+.spec-card .progress-bar-bg {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  height: 8px;
+  overflow: hidden;
+}
+.spec-card .progress-bar-fill {
+  height: 100%;
+  background: var(--green);
+  transition: width 0.2s;
+}
+.spec-card .progress-label { color: var(--gray); font-size: 11px; margin-top: 4px; }
+.spec-card .status-badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 500;
+  margin-top: 8px;
+}
+.spec-card .status-badge.complete { background: rgba(63,185,80,0.2); color: var(--green); }
+.spec-card .status-badge.in-progress { background: rgba(88,166,255,0.2); color: var(--accent); }
+.spec-card .status-badge.pending { background: rgba(110,118,129,0.2); color: var(--gray); }
+.spec-card .status-badge.no-criteria { background: rgba(110,118,129,0.1); color: var(--gray); }
+/* Spec detail view: the raw markdown in a scrollable pre. The content is
+   HTML-escaped on the client (escapeHtml) so it's safe to inject. */
+.spec-detail pre {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 12px;
+  overflow-x: auto;
+  font-size: 12px;
+  max-height: 70vh;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.spec-detail .criteria-list { margin: 12px 0; }
+.spec-detail .criteria-list .criterion { padding: 2px 0; }
+.spec-detail .criteria-list .criterion.done { color: var(--green); }
+.spec-detail .criteria-list .criterion.todo { color: var(--gray); }
+/* Workspace landing page: a responsive grid of project cards. Each card
+   summarizes a discovered project (spec count, run count, last run, and an
+   aggregate status badge). Clicking a card navigates to #/project/<name>. */
+.project-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+  margin: 12px 0 24px 0;
+}
+.project-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px 14px;
+  cursor: pointer;
+  transition: border-color 0.1s;
+}
+.project-card:hover { border-color: var(--accent); }
+.project-card .project-name { font-weight: 500; font-size: 15px; margin-bottom: 6px; }
+.project-card .project-meta { color: var(--gray); font-size: 12px; margin-bottom: 8px; }
+.project-card .project-meta code {
+  background: var(--bg);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 11px;
+  color: var(--fg);
+}
+.project-card .status-badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 500;
+}
+.project-card .status-badge.complete { background: rgba(63,185,80,0.2); color: var(--green); }
+.project-card .status-badge.in-progress { background: rgba(88,166,255,0.2); color: var(--accent); }
+.project-card .status-badge.pending { background: rgba(110,118,129,0.2); color: var(--gray); }
+.project-card .status-badge.no-specs { background: rgba(110,118,129,0.1); color: var(--gray); }
+.nav-links { display: flex; gap: 12px; align-items: center; }
+.nav-links a { color: var(--accent); font-size: 13px; }
+/* Hamburger menu: the nav links collapse into a dropdown behind a
+   sandwich icon so the header stays compact. The toggle button uses
+   three CSS-drawn bars; the dropdown is a positioned panel toggled
+   via the .open class on the .nav-menu container. */
+.nav-menu { position: relative; display: inline-block; }
+.nav-toggle {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  padding: 6px 8px;
+  display: inline-flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.nav-toggle span {
+  display: block;
+  width: 18px;
+  height: 2px;
+  background: var(--fg);
+  border-radius: 1px;
+}
+.nav-toggle:hover { border-color: var(--accent); }
+.nav-dropdown {
+  display: none;
+  position: absolute;
+  right: 0;
+  top: 100%;
+  margin-top: 4px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px 0;
+  min-width: 140px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+  z-index: 20;
+}
+.nav-menu.open .nav-dropdown { display: block; }
+.nav-dropdown a {
+  display: block;
+  padding: 6px 16px;
+  color: var(--accent);
+  font-size: 13px;
+  text-decoration: none;
+}
+.nav-dropdown a:hover { background: var(--bg); }
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>pidag trace</h1>
+  <span id="poll-status"></span>
+  <button id="theme-toggle">light</button>
+  <div class="nav-menu" id="nav-menu">
+    <button class="nav-toggle" id="nav-toggle" aria-label="menu">
+      <span></span><span></span><span></span>
+    </button>
+    <div class="nav-dropdown">
+      <a href="#/workspace">workspace</a>
+      <a href="#/project">project</a>
+      <a href="#/runs">runs</a>
+    </div>
+  </div>
+</div>
+<div class="content" id="app">
+  <p class="muted">Loading...</p>
+</div>
+<div class="toast" id="toast"></div>
+<div id="detail-backdrop"></div>
+<div id="node-detail"></div>
+<script>
+// ===========================================================================
+// pidag trace UI — vanilla JS SPA, no frameworks, no build step.
+//
+// Hash-based routing:
+//   #/                    → workspace landing (project cards grid) or, in
+//                           single-project mode, the Project Overview
+//   #/workspace           → workspace landing (project cards grid)
+//   #/project             → single-project Overview (specs + runs)
+//   #/project/<name>      → workspace project (specs + runs for that project)
+//   #/project/<name>/spec/<spec> → workspace project spec detail
+//   #/project/<name>/run/<id>    → workspace project run detail
+//   #/runs                → sessions list (all runs in the vault)
+//   #/run/<id>            → run detail (trace waterfall + node list, polls)
+//   #/spec/<name>         → single-project spec detail
+//
+// The frontend is read-only; it fetches JSON from /api/* and never mutates
+// the vault. Polling is 2s by default and can be paused/resumed.
+// ===========================================================================
+
+let pollTimer = null;
+let autoRefresh = true;
+let lastSeq = 0;
+let currentNodes = [];
+// vis-timeline handles — kept on window so the polling loop and theme
+// toggle can reach them. `timeline` is the vis.Timeline instance, `tlItems`
+// is the vis.DataSet of items, `tlGroups` is the DataSet of groups.
+window.timeline = null;
+window.tlItems = null;
+window.tlGroups = null;
+// The run_id for the currently-displayed run detail view. Used by the
+// polling loop to re-fetch timeline data and events.
+let currentRunId = null;
+
+// ---- Helpers -------------------------------------------------------------
+
+async function fetchJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(r.status + " " + r.statusText);
+  return r.json();
+}
+
+function render(html) {
+  document.getElementById("app").innerHTML = html;
+}
+
+function showToast(msg) {
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  setTimeout(() => t.classList.remove("show"), 1500);
+}
+
+function copyToClipboard(text) {
+  navigator.clipboard.writeText(text).then(
+    () => showToast("copied to clipboard"),
+    () => showToast("copy failed")
+  );
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]
+  );
+}
+
+// ---- Sessions list view ---------------------------------------------------
+
+async function showSessions() {
+  stopPolling();
+  document.getElementById("poll-status").textContent = "";
+  let runs;
+  try {
+    runs = await fetchJSON("/api/runs");
+  } catch (e) {
+    render('<p class="empty">Failed to load runs: ' + escapeHtml(e.message) + "</p>");
+    return;
+  }
+  if (!runs.length) {
+    render(
+      '<div class="empty"><p>No runs yet.</p>' +
+      '<p class="muted">Start a DAG with <code>pidag run dag.json</code> ' +
+      'or <code>pidag sdd spec.md --run</code>.</p></div>'
+    );
+    return;
+  }
+  render(
+    '<table><thead><tr>' +
+    "<th>Run ID</th><th>Phase</th><th>Started</th><th>Completed</th><th>Nodes</th><th>Status</th>" +
+    "</tr></thead><tbody>" +
+    runs.map(function (r) {
+      var done = r.completed_at ? "done" : "running";
+      var label = r.completed_at ? "done" : "running";
+      var total = r.successful_nodes + r.failed_nodes;
+      var phase = r.spec ? '<a href="#/spec/' + encodeURIComponent(r.spec) + '">' + escapeHtml(r.spec) + "</a>" : '<span class="muted">—</span>';
+      return (
+        '<tr onclick="location.hash=\'#/run/' + encodeURIComponent(r.run_id) + '\'">' +
+        "<td><code>" + escapeHtml(r.run_id) + "</code></td>" +
+        "<td>" + phase + "</td>" +
+        "<td>" + escapeHtml(r.started_at || "—") + "</td>" +
+        "<td>" + escapeHtml(r.completed_at || "—") + "</td>" +
+        "<td>" + total + "</td>" +
+        '<td><span class="badge ' + done + '">' + label + "</span></td>" +
+        "</tr>"
+      );
+    }).join("") +
+    "</tbody></table>"
+  );
+}
+
+// ---- Run detail view ------------------------------------------------------
+
+async function showRun(runId) {
+  stopPolling();
+  lastSeq = 0;
+  currentRunId = runId;
+  // Reset timeline handles so a stale instance from a previous run view
+  // doesn't get updated by the polling loop before the new one is built.
+  window.timeline = null;
+  window.tlItems = null;
+  window.tlGroups = null;
+  var data;
+  try {
+    data = await fetchJSON("/api/runs/" + encodeURIComponent(runId));
+  } catch (e) {
+    render('<p class="empty">Failed to load run: ' + escapeHtml(e.message) + "</p>");
+    return;
+  }
+  var run = data.run;
+  currentNodes = data.nodes || [];
+  var badge = run.completed_at ? "done" : "running";
+  var label = run.completed_at ? "done" : "running";
+  // Show the phase (spec) this run belongs to so the user can see where
+  // the run came from. `data.spec` is derived from the DAG's metadata.spec
+  // by the backend. When null (plain `pidag run` or legacy run), show "—".
+  var phaseHtml = data.spec
+    ? '<a href="#/spec/' + encodeURIComponent(data.spec) + '" class="badge" style="background:var(--card);border:1px solid var(--border);color:var(--accent)">phase: ' + escapeHtml(data.spec) + "</a>"
+    : '<span class="muted">phase: —</span>';
+  render(
+    '<a class="back-link" href="#/runs">← all runs</a>' +
+    '<div class="controls">' +
+    '<button id="refresh-btn">' + (autoRefresh ? "Pause" : "Resume") + "</button>" +
+    '<select id="node-filter"><option value="">all nodes</option></select>' +
+    "</div>" +
+    '<h2><code>' + escapeHtml(run.run_id) + "</code> " +
+    '<span class="badge ' + badge + '">' + label + "</span> " +
+    phaseHtml + "</h2>" +
+    '<p class="muted">Started: ' + escapeHtml(run.started_at || "—") +
+    " · Completed: " + escapeHtml(run.completed_at || "—") +
+    " · Successful: " + run.successful_nodes +
+    " · Failed: " + run.failed_nodes + "</p>" +
+    '<div class="timeline-section">' +
+    "<h3>Gantt Timeline" +
+    '<button class="collapsible-toggle" id="timeline-fit">fit</button>' +
+    "</h3>" +
+    '<div id="timeline"></div>' +
+    "</div>" +
+    "<h3>Trace Waterfall</h3>" +
+    '<div class="waterfall" id="waterfall"></div>' +
+    "<h3>Nodes</h3>" +
+    '<div id="nodes"></div>'
+  );
+  document.getElementById("refresh-btn").onclick = togglePolling;
+  var fitBtn = document.getElementById("timeline-fit");
+  if (fitBtn) fitBtn.onclick = function () { if (window.timeline) window.timeline.fit(); };
+  renderNodes();
+  await initTimeline(runId);
+  startPolling(runId);
+}
+
+function renderNodes() {
+  var container = document.getElementById("nodes");
+  if (!container) return;
+  var filter = document.getElementById("node-filter");
+  var current = filter ? filter.value : "";
+  // Populate the filter dropdown with node IDs from the current run.
+  var nodeIds = [];
+  var seen = {};
+  for (var i = 0; i < currentNodes.length; i++) {
+    var id = currentNodes[i].node_id;
+    if (!seen[id]) { seen[id] = true; nodeIds.push(id); }
+  }
+  if (filter) {
+    filter.innerHTML = '<option value="">all nodes</option>' +
+      nodeIds.map(function (id) {
+        return '<option value="' + escapeHtml(id) + '">' + escapeHtml(id) + "</option>";
+      }).join("");
+    filter.value = current;
+    filter.onchange = renderNodes;
+  }
+  var selected = filter ? filter.value : "";
+  var filtered = selected
+    ? currentNodes.filter(function (n) { return n.node_id === selected; })
+    : currentNodes;
+  if (!filtered.length) {
+    container.innerHTML = '<p class="muted">No nodes match the filter.</p>';
+    return;
+  }
+  container.innerHTML = filtered.map(function (n) {
+    var state = (n.state || "pending").toLowerCase();
+    return (
+      '<div class="node-card">' +
+      '<div class="node-header">' +
+      "<span><code>" + escapeHtml(n.node_id) + "</code> " +
+      '<span class="badge ' + state + '">' + escapeHtml(n.state || "Pending") + "</span></span>" +
+      '<span class="node-meta">' + escapeHtml(n.model || "—") +
+      " · attempt " + (n.attempt || 0) + "</span>" +
+      "</div></div>"
+    );
+  }).join("");
+}
+
+// ---- Timeline (vis-timeline) ---------------------------------------------
+// The Gantt view: one horizontal line per DAG node (group), with a
+// start→end bar per dispatched node. Polling updates the bars in place
+// via vis.DataSet.update() — no full re-render. Clicking a bar opens the
+// node detail panel (state, model, started/ended, artifact output).
+
+var TIMELINE_OPTIONS = {
+  stack: true,            // stack overlapping items vertically within a group
+  showCurrentTime: true,  // live "now" marker
+  zoomable: true,
+  moveable: true,
+  margin: { item: 6, axis: 10 },
+  format: {
+    minorLabels: { millisecond: "SSS", second: "s", minute: "HH:mm", hour: "HH:mm", weekday: "ddd D", day: "D", week: "w", month: "MMM", year: "YYYY" },
+    majorLabels: { minute: "ddd D MMMM", hour: "ddd D MMMM", weekday: "MMMM YYYY", day: "MMMM YYYY", week: "MMMM YYYY", month: "YYYY" }
+  }
+};
+
+async function initTimeline(runId) {
+  var container = document.getElementById("timeline");
+  if (!container) return;
+  if (typeof vis === "undefined" || !vis.Timeline) {
+    container.innerHTML = '<p class="muted">vis-timeline failed to load (CDN unreachable). Trace waterfall below still works.</p>';
+    return;
+  }
+  try {
+    var data = await fetchJSON("/api/runs/" + encodeURIComponent(runId) + "/timeline");
+    window.tlGroups = new vis.DataSet(data.groups || []);
+    window.tlItems = new vis.DataSet(decorateTimelineItems(data.items || []));
+    window.timeline = new vis.Timeline(container, window.tlItems, window.tlGroups, TIMELINE_OPTIONS);
+    window.timeline.on("click", function (props) {
+      if (props.item) showNodeDetail(props.item);
+    });
+    // Apply the current theme — vis-timeline reads CSS variables on redraw.
+    applyTimelineTheme();
+    if (window.timeline) window.timeline.fit();
+  } catch (e) {
+    container.innerHTML = '<p class="muted">Failed to load timeline: ' + escapeHtml(e.message) + "</p>";
+  }
+}
+
+// Decorate each timeline item with the elapsed time in its `content` field.
+// The API returns `content: "<state>"` (e.g. "Done", "Failed"); we append the
+// elapsed duration (e.g. "Done 32ms", "Failed 4m") so the Gantt bar shows both
+// the state (via color) and the wall-clock duration (via text). For running
+// nodes (end is null) we show the elapsed time so far with a "+" suffix.
+function decorateTimelineItems(items) {
+  return items.map(function (it) {
+    var elapsed = formatTimelineElapsed(it.start, it.end);
+    var state = it.content || "";
+    var decorated = Object.assign({}, it);
+    decorated.content = state && elapsed ? state + " " + elapsed : (state || elapsed);
+    return decorated;
+  });
+}
+
+// Format the elapsed time between two RFC3339 timestamps as a compact string:
+//   < 1s   → "123ms"
+//   < 60s  → "1.2s"
+//   < 60m  → "4m 3s"
+//   else   → "1h 2m"
+// When `end` is null/empty, compute elapsed from start to NOW (running node).
+function formatTimelineElapsed(start, end) {
+  if (!start) return "";
+  var s = Date.parse(start);
+  if (isNaN(s)) return "";
+  var e = end ? Date.parse(end) : Date.now();
+  if (isNaN(e)) e = Date.now();
+  var ms = Math.max(0, e - s);
+  if (ms < 1000) return ms + "ms";
+  var sec = Math.floor(ms / 1000);
+  if (sec < 60) {
+    var tenths = Math.floor((ms % 1000) / 100);
+    return (ms / 1000).toFixed(tenths === 0 ? 0 : 1) + "s";
+  }
+  var min = Math.floor(sec / 60);
+  var remSec = sec % 60;
+  if (min < 60) return remSec ? min + "m " + remSec + "s" : min + "m";
+  var hr = Math.floor(min / 60);
+  var remMin = min % 60;
+  return remMin ? hr + "h " + remMin + "m" : hr + "h";
+}
+
+async function refreshTimeline(runId) {
+  if (!window.tlItems || !window.tlGroups) return;
+  try {
+    var data = await fetchJSON("/api/runs/" + encodeURIComponent(runId) + "/timeline");
+    // Groups: update in place (new pending nodes appear as their own line).
+    window.tlGroups.update(data.groups || []);
+    // Items: decorate with elapsed time, then update (replaces by id).
+    window.tlItems.update(decorateTimelineItems(data.items || []));
+    // Remove items whose node is no longer in the response (rare; e.g.
+    // vault was reset). vis.DataSet.remove() is idempotent.
+    var liveIds = {};
+    (data.items || []).forEach(function (it) { liveIds[it.id] = true; });
+    window.tlItems.get().forEach(function (it) {
+      if (!liveIds[it.id]) window.tlItems.remove(it.id);
+    });
+  } catch (e) {
+    // Non-fatal: timeline just won't update this poll cycle.
+  }
+}
+
+function applyTimelineTheme() {
+  // vis-timeline doesn't observe CSS variable changes on its own; a
+  // redraw after the body's data-theme attribute changes is enough to
+  // re-read our overridden .vis-* CSS rules.
+  if (window.timeline) {
+    try { window.timeline.redraw(); } catch (e) { /* ignore */ }
+  }
+}
+
+// ---- Node detail panel ----------------------------------------------------
+
+async function showNodeDetail(nodeId) {
+  var panel = document.getElementById("node-detail");
+  var backdrop = document.getElementById("detail-backdrop");
+  if (!panel || !backdrop) return;
+  panel.innerHTML =
+    '<button class="close-btn" onclick="hideNodeDetail()">close</button>' +
+    '<h3><code>' + escapeHtml(nodeId) + "</code></h3>" +
+    '<p class="detail-meta">Loading…</p>';
+  panel.classList.add("show");
+  backdrop.classList.add("show");
+  backdrop.onclick = hideNodeDetail;
+  // Fetch run detail (for state/model/attempt/timestamp) and the artifact.
+  try {
+    var detail = await fetchJSON("/api/runs/" + encodeURIComponent(currentRunId));
+    var node = (detail.nodes || []).filter(function (n) { return n.node_id === nodeId; })[0];
+    var state = node ? node.state : "pending";
+    var model = node ? (node.model || "—") : "—";
+    var attempt = node ? (node.attempt || 0) : 0;
+    var ts = node ? (node.timestamp || "—") : "—";
+    var metaHtml =
+      '<p class="detail-meta">state: <span class="badge ' + state.toLowerCase() + '">' + escapeHtml(state) + "</span>" +
+      " · model: " + escapeHtml(model) +
+      " · attempt: " + attempt +
+      " · updated: " + escapeHtml(ts) + "</p>";
+    var artifactHtml = '<p class="muted">Loading artifact…</p>';
+    panel.innerHTML =
+      '<button class="close-btn" onclick="hideNodeDetail()">close</button>' +
+      '<h3><code>' + escapeHtml(nodeId) + "</code></h3>" +
+      metaHtml +
+      "<h3>Artifact</h3>" +
+      '<div id="node-artifact">' + artifactHtml + '</div>';
+    // Fetch artifact output.
+    try {
+      var art = await fetchJSON("/api/runs/" + encodeURIComponent(currentRunId) + "/nodes/" + encodeURIComponent(nodeId) + "/artifact");
+      var out = art.artifact;
+      var artEl = document.getElementById("node-artifact");
+      if (artEl) {
+        artEl.innerHTML = out
+          ? '<pre>' + escapeHtml(out) + "</pre>"
+          : '<p class="muted">No artifact yet (node not done).</p>';
+      }
+    } catch (e2) {
+      var artEl2 = document.getElementById("node-artifact");
+      if (artEl2) artEl2.innerHTML = '<p class="muted">Failed to load artifact: ' + escapeHtml(e2.message) + "</p>";
+    }
+  } catch (e) {
+    panel.innerHTML =
+      '<button class="close-btn" onclick="hideNodeDetail()">close</button>' +
+      '<h3><code>' + escapeHtml(nodeId) + "</code></h3>" +
+      '<p class="muted">Failed to load node detail: ' + escapeHtml(e.message) + "</p>";
+  }
+}
+
+function hideNodeDetail() {
+  var panel = document.getElementById("node-detail");
+  var backdrop = document.getElementById("detail-backdrop");
+  if (panel) panel.classList.remove("show");
+  if (backdrop) backdrop.classList.remove("show");
+}
+
+// ---- Theme toggle ---------------------------------------------------------
+
+function toggleTheme() {
+  var current = document.body.getAttribute("data-theme") || "dark";
+  var next = current === "dark" ? "light" : "dark";
+  applyTheme(next);
+}
+
+function applyTheme(theme) {
+  document.body.setAttribute("data-theme", theme);
+  try { localStorage.setItem("pidag-theme", theme); } catch (e) { /* ignore */ }
+  var btn = document.getElementById("theme-toggle");
+  if (btn) btn.textContent = theme === "dark" ? "light" : "dark";
+  applyTimelineTheme();
+}
+
+(function initTheme() {
+  var saved = "dark";
+  try { saved = localStorage.getItem("pidag-theme") || "dark"; } catch (e) { /* ignore */ }
+  document.body.setAttribute("data-theme", saved);
+})();
+
+// ---- Polling loop ---------------------------------------------------------
+
+function startPolling(runId) {
+  if (!autoRefresh) return;
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(function () { pollEvents(runId); }, 2000);
+  pollEvents(runId); // immediate first poll
+  document.getElementById("poll-status").textContent = "auto-refresh: on (2s)";
+}
+
+function stopPolling() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+}
+
+function togglePolling() {
+  autoRefresh = !autoRefresh;
+  var btn = document.getElementById("refresh-btn");
+  if (btn) btn.textContent = autoRefresh ? "Pause" : "Resume";
+  var m = location.hash.match(/^#\/run\/(.+)/);
+  if (m) {
+    var runId = decodeURIComponent(m[1]);
+    if (autoRefresh) startPolling(runId);
+    else {
+      stopPolling();
+      document.getElementById("poll-status").textContent = "auto-refresh: off";
+    }
+  }
+}
+
+async function pollEvents(runId) {
+  try {
+    var events = await fetchJSON("/api/runs/" + encodeURIComponent(runId) + "/events?since=" + lastSeq);
+    var wf = document.getElementById("waterfall");
+    if (!wf) return; // user navigated away
+    var filter = document.getElementById("node-filter");
+    var nodeFilter = filter ? filter.value : "";
+    for (var i = 0; i < events.length; i++) {
+      var se = events[i];
+      lastSeq = Math.max(lastSeq, se.seq + 1);
+      var info = formatEvent(se.event);
+      if (nodeFilter && info.node && info.node !== nodeFilter) continue;
+      var div = document.createElement("div");
+      div.className = "event " + info.cls;
+      div.innerHTML =
+        '<span class="seq">' + se.seq + "</span>" +
+        '<span class="type">' + escapeHtml(info.type) + "</span>" +
+        '<span class="detail">' + escapeHtml(info.text) + "</span>" +
+        '<span class="copy-hint">click to copy</span>';
+      div.onclick = (function (text) {
+        return function () { copyToClipboard(text); };
+      })(info.text);
+      wf.appendChild(div);
+    }
+    // Refresh the Gantt timeline bars in place (no full re-render).
+    refreshTimeline(runId);
+    // Stop polling when DagDone arrives — the run is complete.
+    if (events.some(function (se) { return !!se.event.DagDone; })) {
+      stopPolling();
+      document.getElementById("poll-status").textContent = "complete";
+    }
+  } catch (e) {
+    var ps = document.getElementById("poll-status");
+    if (ps) ps.textContent = "poll error: " + e.message;
+  }
+}
+
+// ---- Event formatting -----------------------------------------------------
+// The Rust Event enum serializes via serde's default externally-tagged
+// representation, so NodeDone { node_id, model, output } becomes
+// { "NodeDone": { "node_id": "...", "model": "...", "output": "..." } }.
+
+function formatEvent(ev) {
+  if (ev.DagSubmitted) return { type: "DagSubmitted", text: "dag submitted", node: "", cls: "submitted" };
+  if (ev.DagDone) return {
+    type: "DagDone",
+    text: ev.DagDone.successful_nodes + " done, " + ev.DagDone.failed_nodes + " failed",
+    node: "", cls: "dag"
+  };
+  if (ev.NodeDispatched) return {
+    type: "NodeDispatched",
+    text: ev.NodeDispatched.node_id + " → " + ev.NodeDispatched.model +
+      " (attempt " + ev.NodeDispatched.attempt + ")",
+    node: ev.NodeDispatched.node_id, cls: "dispatched"
+  };
+  if (ev.NodeDone) return {
+    type: "NodeDone",
+    text: ev.NodeDone.node_id + " (" + ev.NodeDone.model + ")",
+    node: ev.NodeDone.node_id, cls: "done"
+  };
+  if (ev.NodeFailed) return {
+    type: "NodeFailed",
+    text: ev.NodeFailed.node_id + ": " + (ev.NodeFailed.error || "").substring(0, 120),
+    node: ev.NodeFailed.node_id, cls: "failed"
+  };
+  if (ev.NodeRetry) return {
+    type: "NodeRetry",
+    text: ev.NodeRetry.node_id + ": " + ev.NodeRetry.reason,
+    node: ev.NodeRetry.node_id, cls: "retry"
+  };
+  if (ev.ProviderFallback) return {
+    type: "ProviderFallback",
+    text: ev.ProviderFallback.node_id + ": " + ev.ProviderFallback.from_model +
+      " → " + ev.ProviderFallback.to_model,
+    node: ev.ProviderFallback.node_id, cls: "fallback"
+  };
+  if (ev.NodeBlocked) return {
+    type: "NodeBlocked", text: ev.NodeBlocked.node_id,
+    node: ev.NodeBlocked.node_id, cls: "blocked"
+  };
+  if (ev.NodeSkipped) return {
+    type: "NodeSkipped",
+    text: ev.NodeSkipped.node_id + ": " + ev.NodeSkipped.reason,
+    node: ev.NodeSkipped.node_id, cls: "skipped"
+  };
+  return { type: "Unknown", text: JSON.stringify(ev), node: "", cls: "submitted" };
+}
+
+// ---- Project Overview (specs + runs dashboard) --------------------------
+// The whole-project view: enumerates every spec in project_root/specs/*.md
+// with its Exit Criteria progress, alongside the runs in the vault. Each
+// spec card links to #/spec/<name>. The default landing route is #/project
+// when specs are present; otherwise the UI falls back to #/runs.
+
+async function showProject() {
+  stopPolling();
+  document.getElementById("poll-status").textContent = "";
+  var data;
+  try {
+    data = await fetchJSON("/api/project");
+  } catch (e) {
+    render('<p class="empty">Failed to load project: ' + escapeHtml(e.message) + "</p>");
+    return;
+  }
+  var root = data.project_root;
+  var specs = data.specs || [];
+  var runs = data.runs || [];
+
+  // Reflect the project name in the page title and header so multiple pidag
+  // UIs (one per project) are distinguishable in browser tabs. Falls back to
+  // the static default "pidag trace" when no project root is configured.
+  applyProjectName(data.project_name);
+
+  var html = '<h2>Project Overview</h2>';
+  if (!root) {
+    html += '<p class="muted">No project root configured. Run with <code>--project-root PATH</code> to enumerate specs.</p>';
+  } else {
+    html += '<p class="muted">project root: <code>' + escapeHtml(root) + '</code></p>';
+  }
+
+  if (root && specs.length === 0) {
+    html += '<p class="muted">No specs found in <code>' + escapeHtml(root) + '/specs/*.md</code>.</p>';
+  } else if (specs.length > 0) {
+    // Count runs per spec (phase) so each card shows how many runs were
+    // executed for it. A run belongs to a phase when its DAG metadata.spec
+    // matches the spec file stem.
+    var runsBySpec = {};
+    runs.forEach(function (r) { if (r.spec) { runsBySpec[r.spec] = (runsBySpec[r.spec] || 0) + 1; } });
+    html += '<h3>Phases (' + specs.length + ')</h3><div class="spec-grid">';
+    specs.forEach(function (s) {
+      var total = s.exit_criteria_total;
+      var done = s.exit_criteria_done;
+      var pct = total > 0 ? Math.round((done / total) * 100) : 0;
+      var fillStyle = 'width:' + pct + '%';
+      var label = total > 0 ? (done + "/" + total + " criteria · " + pct + "%") : "no exit criteria";
+      var runCount = runsBySpec[s.name] || 0;
+      var runLabel = runCount + " run" + (runCount === 1 ? "" : "s");
+      html +=
+        '<div class="spec-card" onclick="location.hash=\'#/spec/' + encodeURIComponent(s.name) + '\'">' +
+        '<div class="spec-title">' + escapeHtml(s.title) + "</div>" +
+        '<div class="spec-name">' + escapeHtml(s.name) + " · " + runLabel + "</div>" +
+        '<div class="progress-wrap">' +
+        '<div class="progress-bar-bg"><div class="progress-bar-fill" style="' + fillStyle + '"></div></div>' +
+        '<div class="progress-label">' + label + "</div>" +
+        "</div>" +
+        '<span class="status-badge ' + s.status + '">' + escapeHtml(s.status) + "</span>" +
+        "</div>";
+    });
+    html += "</div>";
+  }
+
+  // Runs table (same content as the sessions list, linked from here too).
+  html += '<h3>Runs (' + runs.length + ')</h3>';
+  if (!runs.length) {
+    html += '<p class="muted">No runs yet. Start a DAG with <code>pidag run dag.json</code> ' +
+      'or <code>pidag sdd spec.md --run</code>.</p>';
+  } else {
+    html +=
+      '<table><thead><tr>' +
+      "<th>Run ID</th><th>Phase</th><th>Started</th><th>Completed</th><th>Nodes</th><th>Status</th>" +
+      "</tr></thead><tbody>" +
+      runs.map(function (r) {
+        var done = r.completed_at ? "done" : "running";
+        var label = r.completed_at ? "done" : "running";
+        var total = r.successful_nodes + r.failed_nodes;
+        var phase = r.spec ? '<a href="#/spec/' + encodeURIComponent(r.spec) + '">' + escapeHtml(r.spec) + "</a>" : '<span class="muted">—</span>';
+        return (
+          '<tr onclick="location.hash=\'#/run/' + encodeURIComponent(r.run_id) + '\'">' +
+          "<td><code>" + escapeHtml(r.run_id) + "</code></td>" +
+          "<td>" + phase + "</td>" +
+          "<td>" + escapeHtml(r.started_at || "—") + "</td>" +
+          "<td>" + escapeHtml(r.completed_at || "—") + "</td>" +
+          "<td>" + total + "</td>" +
+          '<td><span class="badge ' + done + '">' + label + "</span></td>" +
+          "</tr>"
+        );
+      }).join("") +
+      "</tbody></table>";
+  }
+  render(html);
+}
+
+// ---- Workspace view (multi-project landing + attach) --------------------
+
+// The workspace landing page (Phase 4a). Fetches `GET /api/workspace` and
+// renders a project cards grid. Each card links to #/project/<name>. When the
+// backend has no workspace root (single-project mode, --project-root only),
+// /api/workspace 404s; we transparently fall back to the single-project
+// Project Overview so the default #/ landing keeps working (guardrail).
+async function showWorkspace() {
+  stopPolling();
+  document.getElementById("poll-status").textContent = "";
+  // The landing page is workspace-scoped, not project-scoped, so reset the
+  // title to the generic pidag title until a project is attached.
+  applyProjectName(null);
+  var data;
+  try {
+    data = await fetchJSON("/api/workspace");
+  } catch (e) {
+    // Workspace endpoint not available → single-project mode. Preserve the
+    // existing default-landing behavior by showing the Project Overview.
+    showProject();
+    return;
+  }
+  var projects = data.projects || [];
+  var wsRoot = data.workspace_root;
+
+  var html = '<h2>Workspace</h2>';
+  if (wsRoot) {
+    html += '<p class="muted">workspace root: <code>' + escapeHtml(wsRoot) + '</code></p>';
+  }
+  if (!projects.length) {
+    html += '<p class="empty">No projects discovered yet.</p>';
+    html += '<p class="muted">Each subdirectory with <code>specs/*.md</code>, ' +
+      '<code>Cargo.toml</code>, or <code>pyproject.toml</code> is treated as a project.</p>';
+  } else {
+    html += '<h3>Projects (' + projects.length + ')</h3><div class="project-grid">';
+    projects.forEach(function (p) {
+      var lastRun = p.last_run ? escapeHtml(p.last_run) : "never run";
+      html +=
+        '<div class="project-card" onclick="location.hash=\'#/project/' + encodeURIComponent(p.name) + '\'">' +
+        '<div class="project-name">' + escapeHtml(p.name) + "</div>" +
+        '<div class="project-meta">' +
+        p.spec_count + " spec" + (p.spec_count === 1 ? "" : "s") +
+        " · " + p.run_count + " run" + (p.run_count === 1 ? "" : "s") +
+        "<br />last run <code>" + lastRun + "</code></div>" +
+        '<span class="status-badge ' + escapeHtml(p.status) + '">' + escapeHtml(p.status) + "</span>" +
+        "</div>";
+    });
+    html += "</div>";
+  }
+  render(html);
+}
+
+// The project attach view (Phase 4a) for `#/project/<name>`. Fetches
+// `GET /api/workspace/projects/{name}` (the project's own vault) and renders
+// its spec cards + runs table — the same shape as the single-project
+// Overview but scoped to the named workspace project. Spec cards link to
+// #/project/<name>/spec/<spec>; run rows link to #/project/<name>/run/<id>.
+async function showProjectNamed(project) {
+  stopPolling();
+  document.getElementById("poll-status").textContent = "";
+  var data;
+  try {
+    data = await fetchJSON("/api/workspace/projects/" + encodeURIComponent(project));
+  } catch (e) {
+    render('<a class="back-link" href="#/workspace">← workspace</a>' +
+      '<p class="empty">Failed to load project: ' + escapeHtml(e.message) + "</p>");
+    return;
+  }
+  applyProjectName(data.project_name || project);
+  var root = data.project_root;
+  var specs = data.specs || [];
+  var runs = data.runs || [];
+
+  var html = '<a class="back-link" href="#/workspace">← workspace</a>';
+  html += '<h2>Project: ' + escapeHtml(data.project_name || project) + "</h2>";
+  if (root) {
+    html += '<p class="muted">project root: <code>' + escapeHtml(root) + '</code></p>';
+  }
+
+  if (!specs.length) {
+    html += '<p class="muted">No specs found in <code>specs/*.md</code>.</p>';
+  } else {
+    html += '<h3>Phases (' + specs.length + ')</h3><div class="spec-grid">';
+    specs.forEach(function (s) {
+      var total = s.exit_criteria_total;
+      var done = s.exit_criteria_done;
+      var pct = total > 0 ? Math.round((done / total) * 100) : 0;
+      var fillStyle = 'width:' + pct + '%';
+      var label = total > 0 ? (done + "/" + total + " criteria · " + pct + "%") : "no exit criteria";
+      var runCount = runs.filter(function (r) { return r.spec === s.name; }).length;
+      var runLabel = runCount + " run" + (runCount === 1 ? "" : "s");
+      html +=
+        '<div class="spec-card" onclick="location.hash=\'#/project/' + encodeURIComponent(project) +
+        '/spec/' + encodeURIComponent(s.name) + '\'">' +
+        '<div class="spec-title">' + escapeHtml(s.title) + "</div>" +
+        '<div class="spec-name">' + escapeHtml(s.name) + " · " + runLabel + "</div>" +
+        '<div class="progress-wrap">' +
+        '<div class="progress-bar-bg"><div class="progress-bar-fill" style="' + fillStyle + '"></div></div>' +
+        '<div class="progress-label">' + label + "</div>" +
+        "</div>" +
+        '<span class="status-badge ' + s.status + '">' + escapeHtml(s.status) + "</span>" +
+        "</div>";
+    });
+    html += "</div>";
+  }
+
+  html += '<h3>Runs (' + runs.length + ')</h3>';
+  if (!runs.length) {
+    html += '<p class="muted">No runs yet for this project.</p>';
+  } else {
+    html +=
+      '<table><thead><tr>' +
+      "<th>Run ID</th><th>Phase</th><th>Started</th><th>Completed</th><th>Nodes</th><th>Status</th>" +
+      "</tr></thead><tbody>" +
+      runs.map(function (r) {
+        var done = r.completed_at ? "done" : "running";
+        var label = r.completed_at ? "done" : "running";
+        var total = r.successful_nodes + r.failed_nodes;
+        var phase = r.spec ? escapeHtml(r.spec) : '<span class="muted">—</span>';
+        return (
+          '<tr onclick="location.hash=\'#/project/' + encodeURIComponent(project) +
+          '/run/' + encodeURIComponent(r.run_id) + '\'">' +
+          "<td><code>" + escapeHtml(r.run_id) + "</code></td>" +
+          "<td>" + phase + "</td>" +
+          "<td>" + escapeHtml(r.started_at || "—") + "</td>" +
+          "<td>" + escapeHtml(r.completed_at || "—") + "</td>" +
+          "<td>" + total + "</td>" +
+          '<td><span class="badge ' + done + '">' + label + "</span></td>" +
+          "</tr>"
+        );
+      }).join("") +
+      "</tbody></table>";
+  }
+  render(html);
+}
+
+// Workspace project spec detail for `#/project/<name>/spec/<spec>`. Uses the
+// workspace-scoped endpoint; renders the same details as the single-project
+// spec view but with a workspace project back-link.
+async function showWorkspaceSpec(project, spec) {
+  stopPolling();
+  document.getElementById("poll-status").textContent = "";
+  applyProjectName(project);
+  var data;
+  try {
+    data = await fetchJSON(
+      "/api/workspace/projects/" + encodeURIComponent(project) +
+      "/specs/" + encodeURIComponent(spec)
+    );
+  } catch (e) {
+    render('<a class="back-link" href="#/project/' + encodeURIComponent(project) + '">← ' + escapeHtml(project) + "</a>" +
+      '<p class="empty">Failed to load spec: ' + escapeHtml(e.message) + "</p>");
+    return;
+  }
+  var total = data.exit_criteria_total;
+  var done = data.exit_criteria_done;
+  var pct = total > 0 ? Math.round((done / total) * 100) : 0;
+  var label = total > 0 ? (done + "/" + total + " · " + pct + "%") : "no exit criteria";
+  render(
+    '<a class="back-link" href="#/project/' + encodeURIComponent(project) + '">← ' + escapeHtml(project) + "</a>" +
+    '<div class="spec-detail">' +
+    '<h2>' + escapeHtml(data.title) + "</h2>" +
+    '<p class="muted"><code>' + escapeHtml(data.file) + "</code> · " + label + "</p>" +
+    "<h3>Spec content</h3>" +
+    "<pre>" + escapeHtml(data.content) + "</pre>" +
+    "</div>"
+  );
+}
+
+// Workspace project run detail for `#/project/<name>/run/<id>`. Uses the
+// workspace-scoped endpoint to read from the project's own vault. Renders a
+// read-only summary (run metadata + nodes) with a workspace back-link.
+async function showWorkspaceRun(project, runId) {
+  stopPolling();
+  document.getElementById("poll-status").textContent = "";
+  applyProjectName(project);
+  var data;
+  try {
+    data = await fetchJSON(
+      "/api/workspace/projects/" + encodeURIComponent(project) +
+      "/runs/" + encodeURIComponent(runId)
+    );
+  } catch (e) {
+    render('<a class="back-link" href="#/project/' + encodeURIComponent(project) + '">← ' + escapeHtml(project) + "</a>" +
+      '<p class="empty">Failed to load run: ' + escapeHtml(e.message) + "</p>");
+    return;
+  }
+  var run = data.run;
+  var nodes = data.nodes || [];
+  var badge = run.completed_at ? "done" : "running";
+  var label = run.completed_at ? "done" : "running";
+  var phaseHtml = data.spec
+    ? '<span class="badge" style="background:var(--card);border:1px solid var(--border);color:var(--accent)">phase: ' + escapeHtml(data.spec) + "</span>"
+    : '<span class="muted">phase: —</span>';
+  var html =
+    '<a class="back-link" href="#/project/' + encodeURIComponent(project) + '">← ' + escapeHtml(project) + "</a>" +
+    '<h2><code>' + escapeHtml(run.run_id) + "</code> " +
+    '<span class="badge ' + badge + '">' + label + "</span> " +
+    phaseHtml + "</h2>" +
+    '<p class="muted">Started: ' + escapeHtml(run.started_at || "—") +
+    " · Completed: " + escapeHtml(run.completed_at || "—") +
+    " · Successful: " + run.successful_nodes +
+    " · Failed: " + run.failed_nodes + "</p>" +
+    '<h3>Nodes (' + nodes.length + ')</h3>';
+  if (!nodes.length) {
+    html += '<p class="muted">No nodes recorded for this run.</p>';
+  } else {
+    html += nodes.map(function (n) {
+      var state = (n.state || "pending").toLowerCase();
+      return (
+        '<div class="node-card">' +
+        '<div class="node-header">' +
+        "<span><code>" + escapeHtml(n.node_id) + "</code> " +
+        '<span class="badge ' + state + '">' + escapeHtml(n.state || "Pending") + "</span></span>" +
+        '<span class="node-meta">' + escapeHtml(n.model || "—") +
+        " · attempt " + (n.attempt || 0) + "</span>" +
+        "</div></div>"
+      );
+    }).join("");
+  }
+  render(html);
+}
+
+// ---- Spec detail view ----------------------------------------------------
+
+async function showSpec(name) {
+  stopPolling();
+  document.getElementById("poll-status").textContent = "";
+  var data;
+  try {
+    data = await fetchJSON("/api/project/specs/" + encodeURIComponent(name));
+  } catch (e) {
+    render('<a class="back-link" href="#/project">← project</a>' +
+      '<p class="empty">Failed to load spec: ' + escapeHtml(e.message) + "</p>");
+    return;
+  }
+  var total = data.exit_criteria_total;
+  var done = data.exit_criteria_done;
+  var pct = total > 0 ? Math.round((done / total) * 100) : 0;
+  var label = total > 0 ? (done + "/" + total + " · " + pct + "%") : "no exit criteria";
+
+  // Extract the Exit Criteria checklist lines from the markdown so we can
+  // render them as a colored list (done=green, todo=gray). Lines outside
+  // the Exit Criteria section's checkboxes are not criteria; we show ALL
+  // checkbox lines here (the backend already excludes code-fence ones).
+  var criteriaHtml = "";
+  if (total > 0) {
+    var lines = data.content.split("\n");
+    var inFence = false;
+    var items = [];
+    for (var i = 0; i < lines.length; i++) {
+      var ln = lines[i];
+      if (ln.trim().startsWith("```")) { inFence = !inFence; continue; }
+      if (inFence) continue;
+      var m = ln.match(/^\s*[-*]\s*\[([xX ])\]\s*(.*)$/);
+      if (m) {
+        var checked = m[1] === "x" || m[1] === "X";
+        items.push({ checked: checked, text: m[2] });
+      }
+    }
+    criteriaHtml = '<div class="criteria-list">';
+    items.forEach(function (it) {
+      criteriaHtml +=
+        '<div class="criterion ' + (it.checked ? "done" : "todo") + '">' +
+        (it.checked ? "&#9745; " : "&#9744; ") + escapeHtml(it.text) +
+        "</div>";
+    });
+    criteriaHtml += "</div>";
+  }
+
+  // Fetch the runs list so we can show the runs that belong to this phase
+  // (runs whose DAG metadata.spec === name). This is the "phase → runs" link:
+  // each run is counted against its phase, and the spec detail view lists
+  // them so you can see the implementation history for the phase.
+  var runsHtml = "";
+  try {
+    var allRuns = await fetchJSON("/api/runs");
+    var specRuns = allRuns.filter(function (r) { return r.spec === name; });
+    if (specRuns.length) {
+      runsHtml =
+        '<h3>Runs for this phase (' + specRuns.length + ')</h3>' +
+        '<table><thead><tr>' +
+        "<th>Run ID</th><th>Started</th><th>Completed</th><th>Nodes</th><th>Status</th>" +
+        "</tr></thead><tbody>" +
+        specRuns.map(function (r) {
+          var done = r.completed_at ? "done" : "running";
+          var label = r.completed_at ? "done" : "running";
+          var total = r.successful_nodes + r.failed_nodes;
+          return (
+            '<tr onclick="location.hash=\'#/run/' + encodeURIComponent(r.run_id) + '\'">' +
+            "<td><code>" + escapeHtml(r.run_id) + "</code></td>" +
+            "<td>" + escapeHtml(r.started_at || "—") + "</td>" +
+            "<td>" + escapeHtml(r.completed_at || "—") + "</td>" +
+            "<td>" + total + "</td>" +
+            '<td><span class="badge ' + done + '">' + label + "</span></td>" +
+            "</tr>"
+          );
+        }).join("") +
+        "</tbody></table>";
+    } else {
+      runsHtml = '<h3>Runs for this phase</h3>' +
+        '<p class="muted">No runs yet for this phase. Start one with ' +
+        '<code>pidag sdd specs/' + escapeHtml(name) + '.md --run</code>.</p>';
+    }
+  } catch (e) {
+    // Runs are a nice-to-have; don't fail the whole view if the runs fetch
+    // errors out.
+    runsHtml = '<p class="muted">(failed to load runs: ' + escapeHtml(e.message) + ")</p>";
+  }
+
+  render(
+    '<a class="back-link" href="#/project">← project</a>' +
+    '<div class="spec-detail">' +
+    '<h2>' + escapeHtml(data.title) + "</h2>" +
+    '<p class="muted"><code>' + escapeHtml(data.file) + "</code> · " + label + "</p>" +
+    criteriaHtml +
+    runsHtml +
+    "<h3>Spec content</h3>" +
+    "<pre>" + escapeHtml(data.content) + "</pre>" +
+    "</div>"
+  );
+}
+
+// ---- Router ---------------------------------------------------------------
+
+function route() {
+  var hash = location.hash;
+  // Workspace project routes: #/project/<name>/spec/<spec> and
+  // #/project/<name>/run/<id> must be matched before the bare
+  // #/project/<name> project-attach route (they share the prefix).
+  var projRun = hash.match(/^#\/project\/([^/]+)\/run\/(.+)$/);
+  if (projRun) {
+    showWorkspaceRun(decodeURIComponent(projRun[1]), decodeURIComponent(projRun[2]));
+    return;
+  }
+  var projSpec = hash.match(/^#\/project\/([^/]+)\/spec\/(.+)$/);
+  if (projSpec) {
+    showWorkspaceSpec(decodeURIComponent(projSpec[1]), decodeURIComponent(projSpec[2]));
+    return;
+  }
+  var proj = hash.match(/^#\/project\/([^/]+)$/);
+  if (proj) {
+    showProjectNamed(decodeURIComponent(proj[1]));
+    return;
+  }
+  // Workspace landing. In single-project mode (--project-root, no workspace
+  // root) /api/workspace 404s and showWorkspace falls back to showProject().
+  if (hash === "#/workspace" || hash === "#/workspace/") {
+    showWorkspace();
+    return;
+  }
+  if (hash.indexOf("#/run/") === 0) {
+    var runId = decodeURIComponent(hash.substring("#/run/".length));
+    showRun(runId);
+  } else if (hash.indexOf("#/spec/") === 0) {
+    var specName = decodeURIComponent(hash.substring("#/spec/".length));
+    showSpec(specName);
+  } else if (hash === "#/runs" || hash === "#/runs/") {
+    showSessions();
+  } else if (hash === "#/project" || hash === "#/project/") {
+    // Single-project Overview (legacy route, kept for backward compat).
+    showProject();
+  } else if (hash === "" || hash === "#") {
+    // Default landing: workspace (with fallback to Project Overview when
+    // the workspace endpoint is unavailable).
+    showWorkspace();
+  } else {
+    showSessions();
+  }
+}
+
+window.addEventListener("hashchange", route);
+// Hamburger menu: toggle the .open class on the .nav-menu container.
+// Close the dropdown when a link is clicked (the hash change navigates
+// away, but the .open class would persist without this).
+(function wireNavMenu() {
+  var menu = document.getElementById("nav-menu");
+  var toggle = document.getElementById("nav-toggle");
+  if (!menu || !toggle) return;
+  toggle.onclick = function (e) {
+    e.stopPropagation();
+    menu.classList.toggle("open");
+  };
+  // Close on any click outside the menu.
+  document.addEventListener("click", function (e) {
+    if (!menu.contains(e.target)) menu.classList.remove("open");
+  });
+  // Close after navigating via a dropdown link.
+  menu.querySelectorAll(".nav-dropdown a").forEach(function (a) {
+    a.addEventListener("click", function () { menu.classList.remove("open"); });
+  });
+})();
+// Apply the project name to the page title and <h1> header so the browser
+// tab and the UI header reflect which project this UI is serving. Called
+// from showProject() and once eagerly on page load so the header is correct
+// before the user navigates to #/project.
+function applyProjectName(name) {
+  var h1 = document.querySelector(".header h1");
+  if (name) {
+    document.title = name + " — pidag trace";
+    if (h1) h1.textContent = name + " — pidag trace";
+  } else {
+    document.title = "pidag trace";
+    if (h1) h1.textContent = "pidag trace";
+  }
+}
+(function wireThemeButton() {
+  var btn = document.getElementById("theme-toggle");
+  if (btn) btn.onclick = toggleTheme;
+  // Sync the button label with the active theme on load.
+  var saved = "dark";
+  try { saved = localStorage.getItem("pidag-theme") || "dark"; } catch (e) { /* ignore */ }
+  if (btn) btn.textContent = saved === "dark" ? "light" : "dark";
+})();
+// Eagerly fetch the project name so the header is correct before route()
+// renders any view (the runs list and run detail also show the header).
+(function eagerProjectName() {
+  fetch("/api/project")
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (d) { if (d) applyProjectName(d.project_name); })
+    .catch(function () { /* ignore — header keeps static default */ });
+})();
+route();
+</script>
+</body>
+</html>
