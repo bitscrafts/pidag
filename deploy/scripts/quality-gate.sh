@@ -50,7 +50,7 @@ fi
 run_check "cargo fmt --check"      cargo fmt --check $WORKSPACE_FLAG
 run_check "cargo check"            cargo check $WORKSPACE_FLAG
 run_check "cargo clippy -D warnings" cargo clippy $WORKSPACE_FLAG -- -D warnings
-run_check "cargo test"             env PIDAG_REQUIRE_PI=1 cargo test -j 2 $WORKSPACE_FLAG
+run_check "cargo test"             env PIDAG_REQUIRE_PI=1 PIDAG_REQUIRE_VALIDATOR=1 cargo test -j 2 $WORKSPACE_FLAG
 
 echo ""
 echo "=== Results ==="

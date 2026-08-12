@@ -495,7 +495,7 @@ async fn run_benchmark(topology: Topology, n: usize) -> (RunMetrics, u64) {
     dag.validate().expect("Generated DAG should be valid");
 
     let run_id = format!("bench_{}_{}", topology, n);
-    let tmpdir = format!("/projects/pidag/_tmp/bench/{}", run_id);
+    let tmpdir = format!("{}/_tmp/bench/{}", env!("CARGO_MANIFEST_DIR"), run_id);
 
     // Clean up old vault directory
     let _ = std::fs::remove_dir_all(&tmpdir);

@@ -8,6 +8,33 @@ use pidag::{Dag, Node, PiPrintWorker, RealShellWorker, SddGenerator, Store, Work
 use std::collections::HashMap;
 use std::time::Duration;
 
+/// Check that the external exit-criteria validator the baseline node invokes is
+/// actually present. Mirrors `pi_available()` in `pi_backend_tests.rs`.
+///
+/// The `validate-baseline` node runs `{validate_script} {spec_path}`, and
+/// `validate_script` resolves to a `loop-engineer` skill script that lives
+/// outside this repository. Executing the prompt without it does not test
+/// pidag at all: the missing-script case makes bash exit 127, which is
+/// non-zero, so `test_validate_baseline_malformed` passed in CI for entirely
+/// the wrong reason while `test_validate_baseline_parse_only` failed.
+///
+/// Set `PIDAG_REQUIRE_VALIDATOR=1` to turn a missing validator into a failure
+/// instead of a skip; the local gate does this.
+fn validator_available(baseline_prompt: &str) -> bool {
+    // The prompt is "<script> <spec_path>"; the script is the first token.
+    let script = baseline_prompt.split_whitespace().next().unwrap_or("");
+    if !script.is_empty() && std::path::Path::new(script).exists() {
+        return true;
+    }
+
+    if std::env::var("PIDAG_REQUIRE_VALIDATOR") == Ok("1".to_string()) {
+        panic!("exit-criteria validator {script:?} not found and PIDAG_REQUIRE_VALIDATOR=1 is set");
+    }
+
+    println!("SKIP: exit-criteria validator not found at {script:?}");
+    false
+}
+
 // ============================================================================
 // Helper functions
 // ============================================================================
@@ -230,6 +257,9 @@ Test description
 
     // The baseline prompt should be a parse-only check (not the full validate
     // script).  Execute it to verify it returns 0.
+    if !validator_available(&baseline.prompt) {
+        return;
+    }
     let output = tokio::process::Command::new("bash")
         .arg("-c")
         .arg(&baseline.prompt)
@@ -278,7 +308,12 @@ Test description
         .find(|n| n.id == "validate-baseline")
         .expect("baseline node exists");
 
-    // Execute the baseline prompt — should fail because Exit Criteria is missing
+    // Execute the baseline prompt — should fail because Exit Criteria is missing.
+    // Gated: without the validator, bash exits 127 and this test would pass
+    // without exercising anything.
+    if !validator_available(&baseline.prompt) {
+        return;
+    }
     let output = tokio::process::Command::new("bash")
         .arg("-c")
         .arg(&baseline.prompt)

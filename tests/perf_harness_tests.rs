@@ -485,7 +485,7 @@ async fn test_counters_are_deterministic() {
     let dag = gen_dag(Topology::Chain, 50);
 
     // First run
-    let tmpdir1 = PathBuf::from("/projects/pidag/_tmp/perf_test_1");
+    let tmpdir1 = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("_tmp/perf_test_1");
     let _ = std::fs::remove_dir_all(&tmpdir1);
     std::fs::create_dir_all(&tmpdir1).unwrap();
     let vault1 = tmpdir1.join("pidag.redb");
@@ -505,7 +505,7 @@ async fn test_counters_are_deterministic() {
     let txn_count1 = counting_store1.write_txn_count();
 
     // Second run with fresh vault
-    let tmpdir2 = PathBuf::from("/projects/pidag/_tmp/perf_test_2");
+    let tmpdir2 = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("_tmp/perf_test_2");
     let _ = std::fs::remove_dir_all(&tmpdir2);
     std::fs::create_dir_all(&tmpdir2).unwrap();
     let vault2 = tmpdir2.join("pidag.redb");
@@ -535,7 +535,10 @@ async fn test_counters_are_deterministic() {
 fn test_benchmark_excluded_from_gate() {
     // Check that benches/scheduler_bench.rs exists (not in tests/)
     // and is properly configured to not run under cargo test
-    let bench_path = std::path::Path::new("/projects/pidag/benches/scheduler_bench.rs");
+    let bench_path = std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/benches/scheduler_bench.rs"
+    ));
     assert!(
         bench_path.exists(),
         "Benchmark should exist at benches/scheduler_bench.rs"

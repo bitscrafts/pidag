@@ -475,7 +475,7 @@ async fn test_permit_released_on_session_drop() {
 /// the invariant more directly without manual counter maintenance.
 #[test]
 fn test_created_field_is_gone() {
-    let source = std::fs::read_to_string("/projects/pidag/src/backend/pi.rs")
+    let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/backend/pi.rs"))
         .expect("Failed to read src/backend/pi.rs");
 
     // The old code had `created: usize` field and increment/decrement logic.
@@ -497,7 +497,7 @@ fn test_created_field_is_gone() {
 /// all concurrent acquires behind RPC round-trips.
 #[test]
 fn test_health_check_not_under_pool_lock() {
-    let source = std::fs::read_to_string("/projects/pidag/src/backend/pi.rs")
+    let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/backend/pi.rs"))
         .expect("Failed to read src/backend/pi.rs");
 
     // Find the acquire_client method
