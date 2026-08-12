@@ -325,6 +325,50 @@ fn test_output_reference_to_parent_expands() {
 }
 
 // ============================================================================
+// F4': test_gate_on_foreach_parent_is_an_error
+// ============================================================================
+#[test]
+fn test_gate_on_foreach_parent_is_an_error() {
+    // F4' / G9': `gate: "critic:fail"` where `critic` fans out over three
+    // models must be a validation error -- never silently rewritten to an
+    // arbitrary child (e.g. "critic-model-a:fail"), which would gate on one
+    // arbitrary member of the ensemble while reading, to anyone scanning the
+    // DAG, as though it gated on all of them.
+    let critic = fanned_node("critic", &["model-a", "model-b", "model-c"]);
+    let mut repair = base_node("repair");
+    repair.gate = Some("critic:fail".to_string());
+    let d = dag(vec![critic, repair]);
+
+    let result = d.expand();
+
+    let err = match result {
+        Err(e) => e,
+        Ok(expanded) => panic!(
+            "gate on a for_each parent must be a validation error, not a \
+             successful expansion: repair.gate = {:?}",
+            expanded.get_node("repair").and_then(|n| n.gate.clone())
+        ),
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("repair"),
+        "error must name the gating node 'repair': {msg}"
+    );
+    assert!(
+        msg.contains("critic"),
+        "error must name the referenced parent 'critic': {msg}"
+    );
+    assert!(
+        msg.to_lowercase().contains("quorum"),
+        "error must direct the author to a quorum node: {msg}"
+    );
+    assert!(
+        !msg.contains("critic-model-a:fail"),
+        "must never be silently rewritten to one arbitrary child: {msg}"
+    );
+}
+
+// ============================================================================
 // F5a: test_expansion_precedes_validation
 // ============================================================================
 #[test]

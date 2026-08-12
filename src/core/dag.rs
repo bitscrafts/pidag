@@ -462,7 +462,11 @@ impl Dag {
     ///    `{{item}}` in `prompt`/`models`/`verify`/`gate` (F1, F2, F3);
     /// 2. rewrite every `depends_on`/`after`/`quorum.of` entry and every
     ///    `{{X.output}}` prompt reference that names a since-removed parent
-    ///    id, to the parent's full child set (F4);
+    ///    id, to the parent's full child set (F4). A `gate` naming a
+    ///    since-removed `for_each` parent is NOT rewritten -- `gate` is a
+    ///    scalar single-node reference and cannot hold a fan-out's set, so
+    ///    this is a validation error instead (F4', G9'), naming the gating
+    ///    node, the parent, and directing the author to `quorum`;
     /// 3. add each (now-expanded) `quorum.of` id to that node's `after` set,
     ///    never `depends_on` (F9, G7) -- see spec-38 premise 2: `depends_on`
     ///    would block the adjudicator exactly when its critics disagree,
@@ -514,7 +518,9 @@ impl Dag {
             parent_to_children.insert(base_id, children_ids);
         }
 
-        // Phase 2: rewrite references to removed parent ids (F4).
+        // Phase 2: rewrite references to removed parent ids (F4). `gate` is
+        // the one exception -- it is a validation error instead (F4', G9'),
+        // handled inline below.
         for node in new_nodes.iter_mut() {
             node.depends_on = expand_ref_list(&node.depends_on, &parent_to_children);
             node.after = expand_ref_list(&node.after, &parent_to_children);
@@ -522,8 +528,33 @@ impl Dag {
                 q.of = expand_ref_list(&q.of, &parent_to_children);
             }
             node.prompt = expand_output_refs(&node.prompt, &parent_to_children);
-            if let Some(g) = node.gate.take() {
-                node.gate = Some(expand_gate_ref(&g, &parent_to_children));
+            if let Some(g) = &node.gate {
+                // F4', G9': a `gate` naming a `for_each` parent is a
+                // validation error, not a rewrite -- `gate` is a scalar
+                // `"<id>:<suffix>"` reference to exactly one upstream node,
+                // it cannot hold a fan-out's whole child set, and picking
+                // one child (e.g. the first) would silently gate on an
+                // arbitrary member of the ensemble while reading, to anyone
+                // scanning the DAG, as though it gated on all of them.
+                let id_part = match g.find(':') {
+                    Some(colon) => &g[..colon],
+                    None => g.as_str(),
+                };
+                if let Some(children) = parent_to_children.get(id_part) {
+                    return Err(PidagError::Validation(format!(
+                        "node '{}': gate '{}' references '{}', which is a for_each \
+                         fan-out expanded into {} children ({}) -- a gate cannot pick \
+                         one arbitrary child of an ensemble to stand for the whole. \
+                         Add a `quorum` node that counts '{}'s children and gate on \
+                         the quorum node instead.",
+                        node.id,
+                        g,
+                        id_part,
+                        children.len(),
+                        children.join(", "),
+                        id_part
+                    )));
+                }
             }
         }
 
@@ -670,23 +701,6 @@ fn expand_output_refs(prompt: &str, parent_to_children: &HashMap<String, Vec<Str
     }
     result.push_str(&prompt[i..]);
     result
-}
-
-/// F4: `gate` is `"<id>:<suffix>"`, a single scalar reference -- it cannot
-/// hold a whole fan-out set. If the referenced id was a `for_each` parent,
-/// this deterministically picks its FIRST child (item order) so the
-/// reference stays live rather than silently dangling; a node that must
-/// gate on the fan-out's collective outcome should use a `quorum` node
-/// instead (F7), which is built for exactly that.
-fn expand_gate_ref(gate: &str, parent_to_children: &HashMap<String, Vec<String>>) -> String {
-    let (id_part, rest) = match gate.find(':') {
-        Some(colon) => gate.split_at(colon),
-        None => (gate, ""),
-    };
-    match parent_to_children.get(id_part).and_then(|c| c.first()) {
-        Some(first_child) => format!("{first_child}{rest}"),
-        None => gate.to_string(),
-    }
 }
 
 #[cfg(test)]
