@@ -30,6 +30,8 @@ fn create_test_node(id: &str, prompt: &str, depends_on: Vec<&str>, after: Vec<&s
         after: after.iter().map(|s| s.to_string()).collect(),
         verify: None,
         verify_pre: None,
+        for_each: None,
+        quorum: None,
     }
 }
 

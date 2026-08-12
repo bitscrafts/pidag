@@ -51,6 +51,14 @@ pub struct TemplateNode {
     pub verify: Option<String>,
     #[serde(default)]
     pub verify_pre: Option<String>,
+    /// spec-38 F1: templates may author a `for_each` fan-out. Passed
+    /// through to `Node.for_each` verbatim (items are literal data, G9 --
+    /// not substituted against `{n}`/`{n-1}`/etc, since the template
+    /// engine's iteration variables and `for_each`'s `{{item}}` are
+    /// separate mechanisms). `WorkflowEngine::expand` runs `Dag::expand`
+    /// on the assembled DAG before its own `dag.validate()` (F5).
+    #[serde(default)]
+    pub for_each: Option<Vec<String>>,
 }
 
 /// Nodes to be repeated for each iteration
@@ -227,6 +235,13 @@ impl WorkflowEngine {
             Self::validate_raw_placeholders(template_name, &node.id, a)?;
         }
 
+        // Validate for_each items (spec-38 F1)
+        if let Some(items) = &node.for_each {
+            for item in items {
+                Self::validate_raw_placeholders(template_name, &node.id, item)?;
+            }
+        }
+
         Ok(())
     }
 
@@ -326,6 +341,16 @@ impl WorkflowEngine {
                     .collect(),
             ),
         };
+
+        // spec-38 F5: expand for_each (a template node may carry one, F1)
+        // before validating, so validation sees the real executed graph.
+        // A no-op for templates without for_each (N1).
+        let dag = dag.expand().map_err(|e| {
+            PidagError::Parse(format!(
+                "Template {} for_each expansion failed: {}",
+                template.name, e
+            ))
+        })?;
 
         dag.validate().map_err(|e| {
             PidagError::Parse(format!(
@@ -427,6 +452,8 @@ impl WorkflowEngine {
             after,
             verify,
             verify_pre,
+            for_each: node.for_each.clone(),
+            quorum: None,
         })
     }
 

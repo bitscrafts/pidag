@@ -5,7 +5,7 @@
 //! never need to poll.
 
 use super::{Inner, NodeState, NodeStatus, RunReport, Scheduler};
-use crate::core::dag::{Dag, ModelRef, Node, Verify};
+use crate::core::dag::{Dag, ModelRef, Node, QuorumConfig, Verify};
 use crate::core::error::PidagError;
 use crate::core::event::{Event, EventSink};
 use crate::worker::{Worker, WorkerOutput};
@@ -57,6 +57,12 @@ impl Scheduler {
         allow_paid: bool,
         checkpoint: Option<&crate::scheduler::Checkpoint>,
     ) -> Result<RunReport, PidagError> {
+        // spec-38 F5/G4: expand for_each/quorum at load, before validation,
+        // so the scheduler below executes a fixed topology it did not
+        // choose. Idempotent (Dag::expand, N1) -- safe even if a caller
+        // (e.g. `pidag run`) already expanded and persisted this same dag.
+        let dag = dag.expand()?;
+
         // Validate DAG
         dag.validate()?;
 
@@ -372,24 +378,50 @@ impl Scheduler {
                     let mut node = node.clone();
                     // I1, I2, I6, I8: Interpolate output references at dispatch time
                     node.prompt = Self::interpolate_outputs(&node.prompt, &node_state);
-                    let worker = Arc::clone(&worker);
-                    let semaphore = Arc::clone(&semaphore);
 
-                    let task_model = node.models.first().map(|m| m.name.clone());
-                    task_set.spawn(async move {
-                        let _permit = semaphore.acquire().await.ok();
-                        let (state, model_used, events, final_attempt, verify_failed) =
-                            Self::dispatch_node(&node, worker.as_ref(), allow_paid).await;
-                        (
-                            node_id,
-                            task_model,
-                            final_attempt,
-                            state,
-                            model_used,
-                            events,
-                            verify_failed,
-                        )
-                    });
+                    if node.node_type.as_deref() == Some("quorum") {
+                        // spec-38 F7a/G5: quorum is arithmetic, not dispatch.
+                        // This node only became ready because every id in
+                        // `quorum.of` is already terminal (wired into
+                        // `after`, never `depends_on`, at expansion time --
+                        // F9, G7), so `node_state` already holds every
+                        // verdict this needs. Neither `worker` nor a
+                        // subprocess is referenced anywhere in this branch
+                        // -- that omission, not a runtime check, is what
+                        // makes F7a true.
+                        let snapshot = node_state.clone();
+                        task_set.spawn(async move {
+                            let state = Self::compute_quorum(&node, &snapshot);
+                            (
+                                node_id,
+                                None::<String>,
+                                1usize,
+                                state,
+                                None::<String>,
+                                Vec::<DispatchEvent>::new(),
+                                false,
+                            )
+                        });
+                    } else {
+                        let worker = Arc::clone(&worker);
+                        let semaphore = Arc::clone(&semaphore);
+
+                        let task_model = node.models.first().map(|m| m.name.clone());
+                        task_set.spawn(async move {
+                            let _permit = semaphore.acquire().await.ok();
+                            let (state, model_used, events, final_attempt, verify_failed) =
+                                Self::dispatch_node(&node, worker.as_ref(), allow_paid).await;
+                            (
+                                node_id,
+                                task_model,
+                                final_attempt,
+                                state,
+                                model_used,
+                                events,
+                                verify_failed,
+                            )
+                        });
+                    }
                 }
             }
 
@@ -1343,6 +1375,9 @@ impl Scheduler {
             after: Vec::new(),
             verify: None,
             verify_pre: None,
+
+            for_each: None,
+            quorum: None,
         };
 
         // C10: record the spend before dispatch, once the allow_paid gate
@@ -1417,6 +1452,74 @@ impl Scheduler {
         // No leading PASS/FAIL token (including an empty reply): fail
         // closed, raw reply preserved as the reason (C4c, G4).
         (false, trimmed.to_string())
+    }
+
+    /// spec-38 F7/F9/F10: quorum is arithmetic over already-terminal
+    /// outputs, never a dispatch. Every id in `quorum.of` was added to this
+    /// node's `after` set at expansion time (F9), so by the time this node
+    /// is popped off the ready queue every one of them is terminal in
+    /// `node_state` -- Done, Failed, or Blocked all count (spec-38 premise
+    /// 1: `interpolate_outputs`-style reads work for any terminal state,
+    /// and this is the same idea applied to raw output lookup). Verdicts
+    /// are parsed with `Self::parse_critic_verdict` -- the SAME function
+    /// `Verify::Critic` uses (F8, G6) -- so "what counts as a pass" cannot
+    /// drift between the two call sites.
+    fn compute_quorum(node: &Node, node_state: &HashMap<String, NodeState>) -> NodeState {
+        // `node.quorum` is guaranteed `Some` for a `node_type == "quorum"`
+        // node that reached the ready queue: `Dag::validate` (F11) rejects
+        // a quorum node with no config or an out-of-bounds `min_pass`
+        // before the run starts. The empty-config fallback below is
+        // defense-in-depth, not a reachable path.
+        let empty = QuorumConfig {
+            of: Vec::new(),
+            min_pass: 0,
+        };
+        let cfg = node.quorum.as_ref().unwrap_or(&empty);
+
+        let mut pass_count = 0usize;
+        let mut lines = Vec::with_capacity(cfg.of.len());
+        for id in &cfg.of {
+            // F10, error-handling expectations: a counted node with no
+            // recorded output at all (e.g. Blocked, or Failed before
+            // producing anything) reports as an unparseable reply -- FAIL,
+            // never an error and never a silent pass.
+            let output = node_state
+                .get(id)
+                .and_then(|s| s.output.as_deref())
+                .unwrap_or("");
+            let (passed, reason) = Self::parse_critic_verdict(output);
+            if passed {
+                pass_count += 1;
+            }
+            lines.push(format!(
+                "{id}: {} - {reason}",
+                if passed { "PASS" } else { "FAIL" }
+            ));
+        }
+
+        let total = cfg.of.len();
+        // `min_pass == 0` is rejected by `Dag::validate` (F11); `&& cfg.min_pass > 0`
+        // is defense-in-depth against a hand-built (unvalidated) `Node`, not
+        // a path a validated DAG can reach.
+        let done = cfg.min_pass > 0 && pass_count >= cfg.min_pass;
+
+        let summary = format!(
+            "quorum: {pass_count}/{total} passed (min_pass={})\n{}",
+            cfg.min_pass,
+            lines.join("\n")
+        );
+
+        NodeState {
+            node_id: node.id.clone(),
+            state: if done {
+                NodeStatus::Done
+            } else {
+                NodeStatus::Failed
+            },
+            model: None,
+            attempts: 1,
+            output: Some(summary),
+        }
     }
 
     /// Run verify_pre before dispatch to capture a baseline token.

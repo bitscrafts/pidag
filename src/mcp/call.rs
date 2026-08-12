@@ -116,6 +116,9 @@ mod tests {
                 after: vec![],
                 verify: None,
                 verify_pre: None,
+
+                for_each: None,
+                quorum: None,
             }],
             metadata: None,
         };

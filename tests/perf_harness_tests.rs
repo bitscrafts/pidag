@@ -48,6 +48,9 @@ fn gen_dag(topology: Topology, n: usize) -> Dag {
                     after: vec![],
                     verify: None,
                     verify_pre: None,
+
+                    for_each: None,
+                    quorum: None,
                 });
             }
         }
@@ -76,6 +79,9 @@ fn gen_dag(topology: Topology, n: usize) -> Dag {
                     after: vec![],
                     verify: None,
                     verify_pre: None,
+
+                    for_each: None,
+                    quorum: None,
                 });
             }
         }
@@ -109,6 +115,9 @@ fn gen_dag(topology: Topology, n: usize) -> Dag {
                     after: vec![],
                     verify: None,
                     verify_pre: None,
+
+                    for_each: None,
+                    quorum: None,
                 });
 
                 // quality_gate node with after edge to implement
@@ -129,6 +138,9 @@ fn gen_dag(topology: Topology, n: usize) -> Dag {
                     after: vec![impl_id.clone()],
                     verify: None,
                     verify_pre: None,
+
+                    for_each: None,
+                    quorum: None,
                 });
 
                 // validate node
@@ -149,6 +161,9 @@ fn gen_dag(topology: Topology, n: usize) -> Dag {
                     after: vec![],
                     verify: None,
                     verify_pre: None,
+
+                    for_each: None,
+                    quorum: None,
                 });
             }
         }

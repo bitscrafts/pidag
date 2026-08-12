@@ -67,6 +67,36 @@ pub struct Node {
     /// PIDAG_VERIFY_PRE (backward compatible, R5.5).
     #[serde(default)]
     pub verify_pre: Option<String>,
+    /// spec-38 F1: literal fan-out. A node carrying this expands at DAG
+    /// load (before `dag.validate()`) into one node per item, `{{item}}`
+    /// substituted in `prompt`/`models`/`verify`/`gate`. The list is
+    /// authored data -- never a file read, a model output, or a glob
+    /// (G9) -- because a computed width is a runtime topology decision,
+    /// which this spec deliberately forbids (G4). Absent (`None`) for
+    /// every node that isn't fanning out; `#[serde(default)]` keeps old
+    /// DAG JSON parsing unchanged (N1).
+    #[serde(default)]
+    pub for_each: Option<Vec<String>>,
+    /// spec-38 F7: `node_type = "quorum"` configuration -- the ids to
+    /// count (`of`) and the pass threshold (`min_pass`). A quorum node
+    /// dispatches no worker and no subprocess (F7a, G5); it reads the
+    /// already-terminal outputs of `of` (added to `after`, never
+    /// `depends_on`, at expansion time -- F9, G7) and counts verdicts
+    /// with the same parser `Verify::Critic` uses (F8, G6). `#[serde(default)]`
+    /// keeps old DAG JSON parsing unchanged (N1).
+    #[serde(default)]
+    pub quorum: Option<QuorumConfig>,
+}
+
+/// spec-38 F7/F11: quorum node configuration. `of` names the nodes whose
+/// recorded outputs are counted; `min_pass` is the pass threshold. Both are
+/// validated by `Dag::validate` -- every id in `of` must name a real node
+/// (F9) and `0 < min_pass <= of.len()` (F11, a quorum that cannot fail or
+/// cannot pass is a configuration mistake).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QuorumConfig {
+    pub of: Vec<String>,
+    pub min_pass: usize,
 }
 
 /// Configuration for a node that calls an external MCP server
@@ -144,8 +174,46 @@ impl Dag {
             }
         }
 
-        // Check for dangling dependencies (both depends_on and after)
         let node_ids: HashSet<_> = self.nodes.iter().map(|n| &n.id).collect();
+
+        // F9, F11: quorum config -- named node id, `of` membership, `min_pass`
+        // bounds. Checked BEFORE the generic dangling-dependency scan below so
+        // a misconfigured quorum gets a message naming the node and the exact
+        // problem (error-handling expectations), not the generic
+        // `PidagError::UnknownDependency`. Runs on the EXPANDED dag (F5): by
+        // this point `of` holds real (post-expansion) node ids and F9 has
+        // already copied them into `after`.
+        for node in &self.nodes {
+            if let Some(q) = &node.quorum {
+                for of_id in &q.of {
+                    if !node_ids.contains(of_id) {
+                        return Err(PidagError::Validation(format!(
+                            "node '{}': quorum.of references unknown node '{}'",
+                            node.id, of_id
+                        )));
+                    }
+                }
+                if q.min_pass == 0 {
+                    return Err(PidagError::Validation(format!(
+                        "node '{}': quorum.min_pass is 0 -- a quorum that cannot fail is a \
+                         configuration mistake, not a runtime condition",
+                        node.id
+                    )));
+                }
+                if q.min_pass > q.of.len() {
+                    return Err(PidagError::Validation(format!(
+                        "node '{}': quorum.min_pass ({}) exceeds quorum.of length ({}) -- a \
+                         quorum that cannot pass is a configuration mistake, not a runtime \
+                         condition",
+                        node.id,
+                        q.min_pass,
+                        q.of.len()
+                    )));
+                }
+            }
+        }
+
+        // Check for dangling dependencies (both depends_on and after)
         for node in &self.nodes {
             for dep in &node.depends_on {
                 if !node_ids.contains(dep) {
@@ -378,6 +446,247 @@ impl Dag {
     pub fn get_node(&self, id: &str) -> Option<&Node> {
         self.nodes.iter().find(|n| n.id == id)
     }
+
+    /// spec-38 F1-F5, F9: expand `for_each` fan-out and wire quorum `after`
+    /// edges. Runs at DAG load, **before** `dag.validate()` (F5, G4) -- the
+    /// scheduler must keep executing a topology it did not choose, so this
+    /// is the one place the shape of the graph is decided. Idempotent: a
+    /// DAG with no `for_each` node returns byte-identical nodes (N1), so
+    /// callers may call it more than once (e.g. once at the real load site
+    /// to persist the expanded `dag_json`, and defensively again inside the
+    /// scheduler) without changing behaviour.
+    ///
+    /// Three phases, each O(nodes + total items) -- no quadratic reference
+    /// rewriting on large fan-outs (N7):
+    /// 1. expand every `for_each` node into one child per item, substituting
+    ///    `{{item}}` in `prompt`/`models`/`verify`/`gate` (F1, F2, F3);
+    /// 2. rewrite every `depends_on`/`after`/`quorum.of` entry and every
+    ///    `{{X.output}}` prompt reference that names a since-removed parent
+    ///    id, to the parent's full child set (F4);
+    /// 3. add each (now-expanded) `quorum.of` id to that node's `after` set,
+    ///    never `depends_on` (F9, G7) -- see spec-38 premise 2: `depends_on`
+    ///    would block the adjudicator exactly when its critics disagree,
+    ///    which is the only time adjudication matters.
+    pub fn expand(mut self) -> Result<Dag, PidagError> {
+        let mut parent_to_children: HashMap<String, Vec<String>> = HashMap::new();
+        let mut new_nodes: Vec<Node> = Vec::with_capacity(self.nodes.len());
+
+        for node in self.nodes.drain(..) {
+            let Some(items) = node.for_each.clone() else {
+                new_nodes.push(node);
+                continue;
+            };
+            if items.is_empty() {
+                // F5b: an empty for_each is a validation error, not a
+                // silently-vanishing node -- fail here, before any node is
+                // produced for this id, rather than let it disappear.
+                return Err(PidagError::Validation(format!(
+                    "node '{}': for_each list is empty",
+                    node.id
+                )));
+            }
+            let base_id = node.id.clone();
+            let mut used_ids: HashSet<String> = HashSet::new();
+            let mut children_ids: Vec<String> = Vec::with_capacity(items.len());
+            for (idx, item) in items.iter().enumerate() {
+                // F3: `<id>-<item>` slugified, falling back to `<id>-<index>`
+                // on a collision or an empty slug.
+                let slug = slugify(item);
+                let candidate = if slug.is_empty() {
+                    format!("{base_id}-{idx}")
+                } else {
+                    format!("{base_id}-{slug}")
+                };
+                let child_id = if used_ids.contains(&candidate) {
+                    format!("{base_id}-{idx}")
+                } else {
+                    candidate
+                };
+                used_ids.insert(child_id.clone());
+
+                let mut child = node.clone();
+                child.for_each = None;
+                child.id = child_id.clone();
+                substitute_item_in_node(&mut child, item);
+                new_nodes.push(child);
+                children_ids.push(child_id);
+            }
+            parent_to_children.insert(base_id, children_ids);
+        }
+
+        // Phase 2: rewrite references to removed parent ids (F4).
+        for node in new_nodes.iter_mut() {
+            node.depends_on = expand_ref_list(&node.depends_on, &parent_to_children);
+            node.after = expand_ref_list(&node.after, &parent_to_children);
+            if let Some(q) = node.quorum.as_mut() {
+                q.of = expand_ref_list(&q.of, &parent_to_children);
+            }
+            node.prompt = expand_output_refs(&node.prompt, &parent_to_children);
+            if let Some(g) = node.gate.take() {
+                node.gate = Some(expand_gate_ref(&g, &parent_to_children));
+            }
+        }
+
+        // Phase 3: quorum.of -> after, never depends_on (F9, G7). Must run
+        // after phase 2 so `of` already holds expanded child ids.
+        for node in new_nodes.iter_mut() {
+            if let Some(q) = node.quorum.clone() {
+                for id in &q.of {
+                    if !node.after.contains(id) {
+                        node.after.push(id.clone());
+                    }
+                }
+            }
+        }
+
+        Ok(Dag {
+            nodes: new_nodes,
+            metadata: self.metadata,
+        })
+    }
+}
+
+/// F3: lowercase, non-alphanumerics to `-`. Item values are authored data
+/// (model names, labels), so ASCII case mapping is sufficient; there is no
+/// requirement (or test) for full Unicode case-folding.
+fn slugify(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+/// F2: replace the literal `{{item}}` placeholder with the item's raw
+/// value (not slugified -- slugification is only for generated ids, F3).
+fn substitute_item(s: &str, item: &str) -> String {
+    s.replace("{{item}}", item)
+}
+
+/// F2: `{{item}}` substitution in `verify`, recursing into `All` arms so a
+/// fanned-out node's `Verify::Critic` prompt/models can reference the item
+/// too.
+fn substitute_item_verify(v: Verify, item: &str) -> Verify {
+    match v {
+        Verify::Shell(s) => Verify::Shell(substitute_item(&s, item)),
+        Verify::Critic { prompt, models } => Verify::Critic {
+            prompt: substitute_item(&prompt, item),
+            models: models
+                .into_iter()
+                .map(|mut m| {
+                    m.name = substitute_item(&m.name, item);
+                    m
+                })
+                .collect(),
+        },
+        Verify::All(arms) => Verify::All(
+            arms.into_iter()
+                .map(|a| substitute_item_verify(a, item))
+                .collect(),
+        ),
+    }
+}
+
+/// F2: substitute `{{item}}` in `prompt`, `models`, `verify` and `gate`.
+/// The generated child `id` is NOT substituted here -- F3's `<id>-<item>`
+/// formula (computed by the caller) is the sole authority on child ids, so
+/// a literal `{{item}}` in an authored `id` has no separate effect.
+fn substitute_item_in_node(node: &mut Node, item: &str) {
+    node.prompt = substitute_item(&node.prompt, item);
+    for m in node.models.iter_mut() {
+        m.name = substitute_item(&m.name, item);
+    }
+    if let Some(g) = node.gate.take() {
+        node.gate = Some(substitute_item(&g, item));
+    }
+    if let Some(v) = node.verify.take() {
+        node.verify = Some(substitute_item_verify(v, item));
+    }
+}
+
+/// F4: expand a `depends_on`/`after`/`quorum.of` list -- any entry naming a
+/// since-removed `for_each` parent id is replaced by all of that parent's
+/// children, in item order. Entries that don't name a parent pass through
+/// unchanged. O(list length): one hash lookup per entry, no nested scan.
+fn expand_ref_list(
+    list: &[String],
+    parent_to_children: &HashMap<String, Vec<String>>,
+) -> Vec<String> {
+    let mut out = Vec::with_capacity(list.len());
+    for id in list {
+        match parent_to_children.get(id) {
+            Some(children) => out.extend(children.iter().cloned()),
+            None => out.push(id.clone()),
+        }
+    }
+    out
+}
+
+/// F4: rewrite `{{X.output}}` references to a since-removed `for_each`
+/// parent into one `{{child.output}}` placeholder per child, so
+/// `interpolate_outputs` (unmodified, spec-38 premise 1) resolves each at
+/// dispatch time. References that don't name a parent are left verbatim.
+fn expand_output_refs(prompt: &str, parent_to_children: &HashMap<String, Vec<String>>) -> String {
+    if parent_to_children.is_empty() || !prompt.contains("{{") {
+        return prompt.to_string();
+    }
+    let mut result = String::with_capacity(prompt.len());
+    let mut i = 0;
+    while let Some(offset) = prompt[i..].find("{{") {
+        let start = i + offset;
+        result.push_str(&prompt[i..start]);
+        let after_open = start + 2;
+        let Some(close_offset) = prompt[after_open..].find("}}") else {
+            // Unclosed placeholder: copy the rest verbatim and stop.
+            result.push_str(&prompt[start..]);
+            i = prompt.len();
+            break;
+        };
+        let end = after_open + close_offset;
+        let content = &prompt[after_open..end];
+        let mut rewritten = false;
+        if let Some(dot_pos) = content.find('.') {
+            let node_ref = &content[..dot_pos];
+            let suffix = &content[dot_pos + 1..];
+            if suffix == "output"
+                && let Some(children) = parent_to_children.get(node_ref)
+            {
+                for child in children {
+                    result.push_str("{{");
+                    result.push_str(child);
+                    result.push_str(".output}}");
+                }
+                rewritten = true;
+            }
+        }
+        if !rewritten {
+            result.push_str(&prompt[start..end + 2]);
+        }
+        i = end + 2;
+    }
+    result.push_str(&prompt[i..]);
+    result
+}
+
+/// F4: `gate` is `"<id>:<suffix>"`, a single scalar reference -- it cannot
+/// hold a whole fan-out set. If the referenced id was a `for_each` parent,
+/// this deterministically picks its FIRST child (item order) so the
+/// reference stays live rather than silently dangling; a node that must
+/// gate on the fan-out's collective outcome should use a `quorum` node
+/// instead (F7), which is built for exactly that.
+fn expand_gate_ref(gate: &str, parent_to_children: &HashMap<String, Vec<String>>) -> String {
+    let (id_part, rest) = match gate.find(':') {
+        Some(colon) => gate.split_at(colon),
+        None => (gate, ""),
+    };
+    match parent_to_children.get(id_part).and_then(|c| c.first()) {
+        Some(first_child) => format!("{first_child}{rest}"),
+        None => gate.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -402,6 +711,8 @@ mod tests {
             after: Vec::new(),
             verify: None,
             verify_pre: None,
+            for_each: None,
+            quorum: None,
         }
     }
 

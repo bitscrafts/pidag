@@ -64,6 +64,8 @@ fn shell_node(id: &str, command: &str) -> Node {
         after: vec![],
         verify: None,
         verify_pre: None,
+        for_each: None,
+        quorum: None,
     }
 }
 
@@ -122,6 +124,9 @@ async fn test_worker_invokes_provider_flag() {
         after: vec![],
         verify: None,
         verify_pre: None,
+
+        for_each: None,
+        quorum: None,
     });
 
     // Use a shim that echoes its arguments to track what gets passed
@@ -179,6 +184,9 @@ async fn test_worker_bare_model_no_provider() {
         after: vec![],
         verify: None,
         verify_pre: None,
+
+        for_each: None,
+        quorum: None,
     });
 
     let worker = PiPrintWorker::with_command(

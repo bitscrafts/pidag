@@ -157,6 +157,16 @@ impl Worker for TypeDispatchWorker {
 
         match node_type {
             Some("shell") => self.shell_worker.run(node_id, prompt, model, attempt).await,
+            // spec-38 F7a/G5: a quorum node is arithmetic, not dispatch --
+            // the scheduler (`Scheduler::compute_quorum`, `execute.rs`)
+            // intercepts it before any `Worker` is ever reached. Landing
+            // here means that bypass itself was bypassed, which is a
+            // scheduler bug, not a runtime condition worth quietly
+            // papering over with a real (spend-a-model) dispatch.
+            Some("quorum") => Err(PidagError::Validation(format!(
+                "quorum node '{node_id}' must not be dispatched through a Worker -- quorum is \
+                 arithmetic (Scheduler::compute_quorum), reaching this arm is a scheduler bug"
+            ))),
             // "llm", None, or any unknown value: route by URL prefix (or agent backend if configured).
             _ => {
                 // If an agent backend is configured, route LLM nodes through it.

@@ -28,6 +28,9 @@ fn make_simple_dag() -> Dag {
             after: vec![],
             verify: None,
             verify_pre: None,
+
+            for_each: None,
+            quorum: None,
         }],
         metadata: None,
     }

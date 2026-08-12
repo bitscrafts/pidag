@@ -253,6 +253,9 @@ fn linear_dag_2() -> Dag {
         after: vec![],
         verify: None,
         verify_pre: None,
+
+        for_each: None,
+        quorum: None,
     };
     let c = Node {
         id: "c".to_string(),
@@ -271,6 +274,9 @@ fn linear_dag_2() -> Dag {
         after: vec![],
         verify: None,
         verify_pre: None,
+
+        for_each: None,
+        quorum: None,
     };
     Dag {
         nodes: vec![a, c],
@@ -301,6 +307,9 @@ fn linear_dag_4() -> Dag {
         after: vec![],
         verify: None,
         verify_pre: None,
+
+        for_each: None,
+        quorum: None,
     };
     Dag {
         nodes: vec![mk("a", ""), mk("b", "a"), mk("c", "b"), mk("d", "c")],
@@ -671,6 +680,9 @@ async fn test_retry_failed_flag_off_skips_failed() {
             after: vec![],
             verify: None,
             verify_pre: None,
+
+            for_each: None,
+            quorum: None,
         }],
         metadata: None,
     };

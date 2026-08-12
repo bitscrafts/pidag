@@ -50,6 +50,9 @@ async fn test_verify_passes_node_done() {
             // Verify checks for the marker file
             verify: Some(Verify::Shell("test -f marker.txt".to_string())),
             verify_pre: None,
+
+            for_each: None,
+            quorum: None,
         }],
     };
 
@@ -89,6 +92,9 @@ async fn test_verify_fails_node_failed() {
             // Verify fails: file doesn't exist
             verify: Some(Verify::Shell("test -f nonexistent.txt".to_string())),
             verify_pre: None,
+
+            for_each: None,
+            quorum: None,
         }],
     };
 
@@ -128,6 +134,9 @@ async fn test_no_verify_unchanged() {
             // No verify field - should work like before
             verify: None,
             verify_pre: None,
+
+            for_each: None,
+            quorum: None,
         }],
     };
 
@@ -171,6 +180,9 @@ async fn test_verify_runs_in_project_root() {
                 "test -f marker.txt && test -f output.txt".to_string(),
             )),
             verify_pre: None,
+
+            for_each: None,
+            quorum: None,
         }],
     };
 
@@ -210,6 +222,9 @@ async fn test_success_alone_cannot_promote_when_verify_set() {
             // Verify fails
             verify: Some(Verify::Shell("exit 1".to_string())),
             verify_pre: None,
+
+            for_each: None,
+            quorum: None,
         }],
     };
 
@@ -249,6 +264,9 @@ async fn test_verify_failure_not_retryable() {
             after: vec![],
             verify: Some(Verify::Shell("exit 1".to_string())),
             verify_pre: None,
+
+            for_each: None,
+            quorum: None,
         }],
     };
 
@@ -287,6 +305,9 @@ async fn test_verify_failure_event_states_both_facts() {
             after: vec![],
             verify: Some(Verify::Shell("echo verify_failed && exit 1".to_string())),
             verify_pre: None,
+
+            for_each: None,
+            quorum: None,
         }],
     };
 
@@ -415,6 +436,9 @@ async fn test_verify_with_timeout() {
             after: vec![],
             verify: Some(Verify::Shell("test -f marker.txt".to_string())),
             verify_pre: None,
+
+            for_each: None,
+            quorum: None,
         }],
     };
 
@@ -454,6 +478,9 @@ async fn test_no_verify_on_other_node_types() {
             after: vec![],
             verify: Some(Verify::Shell("test -f file.txt".to_string())),
             verify_pre: None,
+
+            for_each: None,
+            quorum: None,
         }],
     };
 
@@ -485,6 +512,9 @@ async fn test_no_verify_on_other_node_types() {
                 "git diff --quiet && exit 1 || exit 0".to_string(),
             )),
             verify_pre: None,
+
+            for_each: None,
+            quorum: None,
         }],
     };
 
@@ -520,6 +550,9 @@ async fn test_verify_integration_passes() {
             // Simple verify that always succeeds
             verify: Some(Verify::Shell("exit 0".to_string())),
             verify_pre: None,
+
+            for_each: None,
+            quorum: None,
         }],
     };
 
@@ -568,6 +601,9 @@ async fn test_verify_integration_fails() {
             // Verify fails: exit with non-zero
             verify: Some(Verify::Shell("exit 1".to_string())),
             verify_pre: None,
+
+            for_each: None,
+            quorum: None,
         }],
     };
 
@@ -619,6 +655,9 @@ async fn test_verify_pre_absent_behaves_as_before() {
             after: vec![],
             verify: Some(Verify::Shell("exit 0".to_string())),
             verify_pre: None,
+
+            for_each: None,
+            quorum: None,
         }],
     };
 
@@ -660,6 +699,9 @@ async fn test_verify_pre_exposed_as_env() {
                 "test \"$PIDAG_VERIFY_PRE\" = TOKEN123".to_string(),
             )),
             verify_pre: Some("echo TOKEN123".to_string()),
+
+            for_each: None,
+            quorum: None,
         }],
     };
 
@@ -699,6 +741,9 @@ async fn test_verify_pre_failure_fails_node() {
             after: vec![],
             verify: Some(Verify::Shell("exit 0".to_string())),
             verify_pre: Some("exit 3".to_string()),
+
+            for_each: None,
+            quorum: None,
         }],
     };
 
@@ -831,6 +876,9 @@ async fn test_dirty_tree_at_start_does_not_satisfy_verify() {
             verify_pre: Some(format!(
                 "cd {repo} && ( git status --porcelain; git diff; git diff --cached; git ls-files -o --exclude-standard -z | xargs -0 -r sha256sum ) | sha256sum"
             )),
+
+            for_each: None,
+            quorum: None,
         }],
     };
 
@@ -938,6 +986,9 @@ async fn test_new_change_on_dirty_tree_passes() {
             verify_pre: Some(format!(
                 "cd {repo} && ( git status --porcelain; git diff; git diff --cached; git ls-files -o --exclude-standard -z | xargs -0 -r sha256sum ) | sha256sum"
             )),
+
+            for_each: None,
+            quorum: None,
         }],
     };
 
@@ -1007,6 +1058,9 @@ async fn test_verify_pre_output_capped() {
                     .to_string(),
             )),
             verify_pre: Some("printf '\\u2713%.0s' $(seq 1 3000)".to_string()),
+
+            for_each: None,
+            quorum: None,
         }],
     };
 
@@ -1098,6 +1152,9 @@ async fn test_content_only_change_on_dirty_tree_passes() {
                 "cd {repo} && test \"$( {snip} )\" != \"$PIDAG_VERIFY_PRE\""
             ))),
             verify_pre: Some(format!("cd {repo} && {snip}")),
+
+            for_each: None,
+            quorum: None,
         }],
     };
 

@@ -39,6 +39,8 @@ fn node(id: &str, depends_on: &[&str], after: &[&str]) -> Node {
         after: after.iter().map(|s| s.to_string()).collect(),
         verify: None,
         verify_pre: None,
+        for_each: None,
+        quorum: None,
     }
 }
 

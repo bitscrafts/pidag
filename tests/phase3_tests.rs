@@ -554,6 +554,9 @@ async fn test_scheduler_without_store_unchanged() {
             after: vec![],
             verify: None,
             verify_pre: None,
+
+            for_each: None,
+            quorum: None,
         }],
     };
 

@@ -27,6 +27,9 @@ fn simple_dag() -> Dag {
                 after: vec![],
                 verify: None,
                 verify_pre: None,
+
+                for_each: None,
+                quorum: None,
             },
             Node {
                 id: "node-b".to_string(),
@@ -48,6 +51,9 @@ fn simple_dag() -> Dag {
                 after: vec![],
                 verify: None,
                 verify_pre: None,
+
+                for_each: None,
+                quorum: None,
             },
         ],
     }
@@ -133,6 +139,9 @@ fn test_rpc_dag_submit_cycle() {
                 after: vec![],
                 verify: None,
                 verify_pre: None,
+
+                for_each: None,
+                quorum: None,
             },
             Node {
                 id: "node-b".to_string(),
@@ -154,6 +163,9 @@ fn test_rpc_dag_submit_cycle() {
                 after: vec![],
                 verify: None,
                 verify_pre: None,
+
+                for_each: None,
+                quorum: None,
             },
         ],
     };
@@ -188,6 +200,9 @@ fn test_rpc_dag_submit_missing_dep() {
             after: vec![],
             verify: None,
             verify_pre: None,
+
+            for_each: None,
+            quorum: None,
         }],
     };
 

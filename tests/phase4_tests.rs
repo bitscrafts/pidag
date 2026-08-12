@@ -32,6 +32,9 @@ async fn test_shell_worker_success() {
             after: vec![],
             verify: None,
             verify_pre: None,
+
+            for_each: None,
+            quorum: None,
         }],
     };
 
@@ -70,6 +73,9 @@ async fn test_shell_worker_failure() {
             after: vec![],
             verify: None,
             verify_pre: None,
+
+            for_each: None,
+            quorum: None,
         }],
     };
 
@@ -107,6 +113,9 @@ async fn test_shell_worker_timeout() {
             after: vec![],
             verify: None,
             verify_pre: None,
+
+            for_each: None,
+            quorum: None,
         }],
     };
 
@@ -145,6 +154,9 @@ async fn test_shell_worker_captures_stderr() {
             after: vec![],
             verify: None,
             verify_pre: None,
+
+            for_each: None,
+            quorum: None,
         }],
     };
 
@@ -763,6 +775,9 @@ async fn test_render_status_skipped_state() {
                 after: vec![],
                 verify: None,
                 verify_pre: None,
+
+                for_each: None,
+                quorum: None,
             },
             Node {
                 id: "node2".to_string(),
@@ -781,6 +796,9 @@ async fn test_render_status_skipped_state() {
                 after: vec![],
                 verify: None,
                 verify_pre: None,
+
+                for_each: None,
+                quorum: None,
             },
         ],
     };
@@ -822,6 +840,9 @@ async fn test_shell_worker_command_not_found() {
             after: vec![],
             verify: None,
             verify_pre: None,
+
+            for_each: None,
+            quorum: None,
         }],
     };
 

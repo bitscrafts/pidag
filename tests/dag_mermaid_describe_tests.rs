@@ -32,6 +32,8 @@ fn node(id: &str, f: impl FnOnce(&mut Node)) -> Node {
         after: vec![],
         verify: None,
         verify_pre: None,
+        for_each: None,
+        quorum: None,
     };
     f(&mut n);
     n

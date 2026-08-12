@@ -80,6 +80,14 @@ pub async fn handle_dag_submit(
     let dag: Dag = serde_json::from_value(dag_json.clone())
         .map_err(|e| (-32602, format!("Invalid DAG JSON: {}", e)))?;
 
+    // spec-38 F5/G4: expand for_each/quorum before validating, same as the
+    // `pidag run` CLI path -- the worker built below must see the expanded
+    // (child) node ids, not the un-expanded parent. No-op for a DAG without
+    // for_each/quorum (N1).
+    let dag = dag
+        .expand()
+        .map_err(|e| (-32000, format!("DAG expansion failed: {}", e)))?;
+
     // Validate the DAG
     dag.validate()
         .map_err(|e| (-32000, format!("DAG validation failed: {}", e)))?;

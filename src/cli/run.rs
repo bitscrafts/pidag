@@ -88,6 +88,18 @@ pub async fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let dag: Dag =
         serde_json::from_str(&dag_json).map_err(|e| format!("Failed to parse DAG JSON: {}", e))?;
 
+    // spec-38 F5/F6/G4: expand for_each/quorum at load, before validation --
+    // the scheduler must keep executing a topology it did not choose. The
+    // vault is the record of what actually ran, so `dag_json` from here on
+    // is the EXPANDED graph (child ids, not the parent) -- both the worker
+    // built below and RunMeta.dag_json need it, not the as-authored file.
+    // A no-op re-serialization for a DAG with no for_each/quorum (N1).
+    let dag = dag
+        .expand()
+        .map_err(|e| format!("DAG expansion failed: {}", e))?;
+    let dag_json = serde_json::to_string(&dag)
+        .map_err(|e| format!("Failed to serialize expanded DAG: {}", e))?;
+
     // Validate DAG
     dag.validate()
         .map_err(|e| format!("DAG validation failed: {}", e))?;

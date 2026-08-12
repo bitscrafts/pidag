@@ -4,7 +4,7 @@
 - **Crate**: `pidag`
 - **Priority**: HIGH — `docs/ARCHITECTURE.md` §5. The pattern the failure research supports:
   several models reviewing in parallel, then a cheap vote.
-- **Status**: SPECIFIED — not yet dispatched
+- **Status**: IMPLEMENTED 2026-08-12; **F4' correction outstanding** — see F4'.
 - **Source**: `docs/ARCHITECTURE.md` §5–6 (`for_each` 1 d, quorum 1 d), audit C-2.
 - **Depends-On**: spec-37 (critic) — landed. Its verdict parser is reused here, deliberately.
 
@@ -70,10 +70,27 @@ had requirements withdrawn for unverified premises):
   slugified (lowercase, non-alphanumerics to `-`), falling back to `<id>-<index>` on a
   collision or an empty slug. Ids must be deterministic across runs — resume depends on it.
 
-- **F4 (references to the parent expand too)**: any `depends_on`, `after`, `gate` or
-  `{{X.output}}` reference naming the un-expanded parent id resolves to **all** of its
-  children. Without this, fan-out is unusable: the adjudicator could not name the set it
-  adjudicates.
+- **F4 (references to the parent expand too)**: any `depends_on`, `after` or `{{X.output}}`
+  reference naming the un-expanded parent id resolves to **all** of its children. Without
+  this, fan-out is unusable: the adjudicator could not name the set it adjudicates.
+
+- **F4' (a `gate` on a fan-out parent is a validation error) — CORRECTED 2026-08-12.**
+
+  F4 originally listed `gate` alongside the others. **That was wrong.** `gate` is a scalar
+  `"<id>:<suffix>"` targeting exactly one upstream node; it cannot hold a set, so there is
+  no expansion for it to undergo. The implementation flagged this and, per the spec as
+  written, resolved it by rewriting the reference to the fan-out's **first child**.
+
+  That is the wrong resolution and it must not ship. `gate: "critic:fail"` over three
+  critics would silently become `gate: "critic-model-a:fail"` — gating on an arbitrary one
+  of three while reading, to anyone scanning the DAG, as though it gates on all of them.
+  Deterministic is not the same as meaningful. This is the codebase's signature defect: a
+  thing that looks right and quietly does something else.
+
+  **A `gate` referencing a `for_each` parent is a validation error**, raised before the run
+  starts, naming the gating node, the parent it references, and directing the author to a
+  `quorum` node — which exists precisely to reduce a fan-out to one outcome a gate can read.
+  Gating on one arbitrary member of an ensemble is never what the author meant.
 
 - **F5 (expand before validate)**: expansion runs at DAG load, **before** `dag.validate()`, so
   cycle and dangling-reference checking sees the real executed graph. An empty `for_each` list
@@ -163,6 +180,7 @@ list is literal, because a computed width is a runtime topology decision.
 | F3c | `test_id_collision_falls_back_to_index` | items slugifying identically | distinct ids, no panic |
 | F4a | `test_depends_on_parent_expands_to_children` | `adjudicate.after = [critic]` | after = all 3 children |
 | F4b | `test_output_reference_to_parent_expands` | `{{critic.output}}` downstream | resolves to all children |
+| F4' | `test_gate_on_foreach_parent_is_an_error` | `gate: "critic:fail"` where `critic` fans out | **validation error** naming the gating node, the parent, and pointing at `quorum`. Never silently rewritten to one child |
 | F5a | `test_expansion_precedes_validation` | child creating a cycle | validation catches it |
 | F5b | `test_empty_for_each_is_an_error` | `for_each: []` | validation error, node does not vanish |
 | F6 | `test_vault_stores_expanded_dag` | run a `for_each` DAG | `dag_json` contains child ids, not the parent |
@@ -248,6 +266,10 @@ env PIDAG_REQUIRE_PI=1 PIDAG_REQUIRE_VALIDATOR=1 cargo test -p pidag -j 2 --no-f
 - **G7 — do NOT wire quorum through `depends_on`** (F9). It must run when its critics fail.
 - **G8 — do NOT change `Verify`, the critic path, `verify_pre`, or the `Worker`/`Store`
   traits.** spec-37 is settled and tested.
+- **G9' — do NOT resolve a `gate` on a fan-out parent by picking a child** (F4'). Not the
+  first, not the last, not by index. It is a validation error. A gate that names one
+  arbitrary member of an ensemble is meaningless and looks correct, which is worse than
+  refusing to run.
 - **G9 — do NOT make `for_each` iterate anything computed** — no file reads, no model output,
   no globs. A computed width is a runtime topology decision, which G4 forbids.
 - **G10 — do NOT regenerate any pinned fixture** and never run an `#[ignore]`d generator with
@@ -275,7 +297,8 @@ env PIDAG_REQUIRE_PI=1 PIDAG_REQUIRE_VALIDATOR=1 cargo test -p pidag -j 2 --no-f
 
 | File | Change |
 |------|--------|
-| `src/core/dag.rs` | `for_each`, quorum config, expansion, validation (F1–F5, F9, F11) |
+| `src/core/dag.rs` | `for_each`, quorum config, expansion, validation (F1–F5, F4', F9, F11) |
+| `src/cli/run.rs`, `src/rpc/handlers.rs` | expand before validating and before building the worker; persist the expanded `dag_json` (F6) |
 | `src/scheduler/execute.rs` | extract the verdict parser for sharing (F8) |
 | `src/worker/type_dispatch.rs` | `"quorum"` arm, dispatching no worker (F7) |
 | `src/workflow/mod.rs` | templates may carry `for_each` (F1) |

@@ -110,6 +110,8 @@ fn mk_node(id: &str, models: Vec<&str>, attempts: usize, backoff_ms: u64) -> Nod
         after: vec![],
         verify: None,
         verify_pre: None,
+        for_each: None,
+        quorum: None,
     }
 }
 
@@ -462,6 +464,9 @@ async fn t13_shell_node_path_unaffected_by_429_logic() {
         after: vec![],
         verify: None,
         verify_pre: None,
+
+        for_each: None,
+        quorum: None,
     };
     worker.set("sh1", "", 1, Script::Success("done".into()));
     let (report, events) = run_one(node, worker).await;

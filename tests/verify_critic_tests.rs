@@ -55,6 +55,8 @@ fn base_node(id: &str) -> Node {
         after: vec![],
         verify: None,
         verify_pre: None,
+        for_each: None,
+        quorum: None,
     }
 }
 

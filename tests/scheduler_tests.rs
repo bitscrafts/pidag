@@ -867,6 +867,9 @@ async fn test_node_timeout_marks_node_failed_when_worker_exceeds_deadline() {
             after: vec![],
             verify: None,
             verify_pre: None,
+
+            for_each: None,
+            quorum: None,
         }],
     };
     // Worker would succeed, but only after 80ms — the 20ms deadline fires first.
@@ -924,6 +927,9 @@ async fn test_node_timeout_none_preserves_worker_success() {
             after: vec![],
             verify: None,
             verify_pre: None,
+
+            for_each: None,
+            quorum: None,
         }],
     };
     let worker = DelayWorker::new(20, "ok".to_string());
