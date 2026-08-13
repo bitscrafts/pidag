@@ -371,6 +371,144 @@ fn depends_on_parts(
     deps
 }
 
+/// Every artifact any part owns, mapped to the part number(s) that own it.
+///
+/// Built from `all_groups` (every part's criteria assignment), so ownership is
+/// computable for all parts, not only the one being rendered. An artifact
+/// mentioned by more than one part's criteria keeps every owning part number —
+/// that is a grouping ambiguity in the parent, surfaced rather than arbitrated
+/// (see "Error handling expectations" in spec-40).
+fn artifact_owners(
+    all_groups: &[Vec<usize>],
+    parent_criteria: &[ExitCriterion],
+) -> Vec<(String, Vec<usize>)> {
+    let mut owners: Vec<(String, Vec<usize>)> = Vec::new();
+    for (i, group) in all_groups.iter().enumerate() {
+        let part_num = i + 1;
+        for artifact in owned_artifacts(group, parent_criteria) {
+            match owners.iter_mut().find(|(a, _)| *a == artifact) {
+                Some((_, parts)) => {
+                    if !parts.contains(&part_num) {
+                        parts.push(part_num);
+                    }
+                }
+                None => owners.push((artifact, vec![part_num])),
+            }
+        }
+    }
+    owners
+}
+
+/// The first occurrence of `token` in `line`, bounded so it cannot match inside
+/// a longer path-like token (e.g. `store.rs` must not match inside
+/// `redb_store.rs`). Uses the same character class as [`extract_mentioned_modules`].
+fn find_bounded_occurrence(line: &str, token: &str) -> Option<(usize, usize)> {
+    fn is_module_char(c: char) -> bool {
+        c.is_alphanumeric() || c == '_' || c == '.' || c == '-'
+    }
+
+    let mut search_from = 0;
+    while search_from < line.len() {
+        let rel = line[search_from..].find(token)?;
+        let start = search_from + rel;
+        let end = start + token.len();
+        let before_ok = line[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !is_module_char(c));
+        let after_ok = line[end..]
+            .chars()
+            .next()
+            .is_none_or(|c| !is_module_char(c));
+        if before_ok && after_ok {
+            return Some((start, end));
+        }
+        search_from = start + 1;
+    }
+    None
+}
+
+/// Annotate one Architecture line in place with the part number(s) of any
+/// artifact it names that a **different** part owns (S3). An artifact this
+/// part owns too, or that no part owns, is left untouched (S3b, S7) — S7
+/// specifically because a wrong attribution is worse than none: it would tell
+/// an implementer to skip something nobody is building.
+fn annotate_line(line: &str, my_part_num: usize, owners: &[(String, Vec<usize>)]) -> String {
+    let mut marks: Vec<(usize, usize, String)> = Vec::new();
+    for token in extract_mentioned_modules(line) {
+        let Some((_, parts)) = owners.iter().find(|(a, _)| *a == token) else {
+            continue; // S7a: nobody owns it -- do not guess.
+        };
+        let mut others: Vec<usize> = parts
+            .iter()
+            .copied()
+            .filter(|p| *p != my_part_num)
+            .collect();
+        if others.is_empty() {
+            continue; // S3b: only this part owns it.
+        }
+        others.sort_unstable();
+        let Some((start, end)) = find_bounded_occurrence(line, &token) else {
+            continue;
+        };
+        let marker = if others.len() == 1 {
+            format!(" **[Part {}]**", others[0])
+        } else {
+            let list = others
+                .iter()
+                .map(|p| p.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(" **[Parts {}]**", list)
+        };
+        marks.push((start, end, marker));
+    }
+
+    if marks.is_empty() {
+        return line.to_string();
+    }
+    marks.sort_by_key(|(start, ..)| *start);
+
+    let mut out = String::new();
+    let mut last = 0usize;
+    for (start, end, marker) in marks {
+        if start < last {
+            continue; // overlapping match on this line; keep the earlier one.
+        }
+        // Land the marker outside any closing backtick/quote/paren so it reads
+        // as `` `path.rs` **[Part 2]** `` rather than splitting the token.
+        let mut insert_at = end;
+        while let Some(c) = line[insert_at..].chars().next() {
+            if matches!(c, '`' | '\'' | '"' | ')') {
+                insert_at += c.len_utf8();
+            } else {
+                break;
+            }
+        }
+        out.push_str(&line[last..insert_at]);
+        out.push_str(&marker);
+        last = insert_at;
+    }
+    out.push_str(&line[last..]);
+    out
+}
+
+/// Annotate every line of the parent's Architecture with cross-part ownership.
+///
+/// Every line is preserved (S5) — this rewrites lines in place, it never drops
+/// one. Only lines naming an artifact owned by a different part gain a marker.
+fn annotate_architecture(
+    architecture: &str,
+    my_part_num: usize,
+    owners: &[(String, Vec<usize>)],
+) -> String {
+    architecture
+        .lines()
+        .map(|line| annotate_line(line, my_part_num, owners))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Generate child spec content with metadata and rewritten Exit Criteria.
 ///
 /// Includes Parent-Spec metadata, only the criteria assigned to this child, and
@@ -378,6 +516,14 @@ fn depends_on_parts(
 /// because without it every child still described the whole system: a 15-criteria
 /// spec split into three parts had part1 build all six files on its own, leaving
 /// parts 2 and 3 with nothing to do (audit U-2, measured 2026-08-12).
+///
+/// The Architecture is retained verbatim as context (spec-40): deleting design
+/// rationale would silently drop the reasoning that prevents a wrong
+/// implementation. What changes is *ordering* — Scope is emitted first, so the
+/// narrow instruction is read before the broad description — and *attribution*:
+/// every artifact the Architecture names that a different part owns is marked
+/// in place with that part's number. A trailing note alone already existed and
+/// already failed (docs/FINDINGS.md: "split divided the checklist, not the work").
 pub fn generate_child_spec_content(
     parent_content: &str,
     parent_stem: &str,
@@ -389,7 +535,6 @@ pub fn generate_child_spec_content(
 ) -> Result<String, PidagError> {
     // Extract parent's TDD Contract and other sections
     let tdd_section = extract_section(parent_content, "## TDD Contract");
-    let architecture = extract_section(parent_content, "## Architecture");
     let requirements = extract_section(parent_content, "## Requirements");
     let guardrails = extract_section(parent_content, "## Guardrails");
 
@@ -449,24 +594,11 @@ pub fn generate_child_spec_content(
         child.push_str("\n\n");
     }
 
-    // Copy Architecture. It is retained verbatim because it is genuine context --
-    // but it describes the WHOLE system, and that is exactly what made splitting
-    // counterproductive: an implementer reading it built every module regardless of
-    // which criteria this part owned, leaving the other parts with nothing to do.
-    // The Scope section below is what narrows it.
-    if !architecture.is_empty() {
-        child.push_str("## Architecture\n\n");
-        child.push_str(&architecture);
-        child.push_str("\n\n");
-        child.push_str(
-            "> **Note**: the Architecture above describes the FULL system, including\n\
-             > artifacts owned by other parts. Build only what Scope lists.\n\n",
-        );
-    }
-
-    // Scope: the artifacts THIS part owns. Without it the child spec still
-    // described the entire system and the split divided the checklist while
-    // duplicating the work.
+    // Scope FIRST (S1): the narrow instruction must be read before the broad
+    // Architecture description, not after it. A full-system Architecture read
+    // first forms the implementer's mental model and a trailing caveat does not
+    // undo it -- that ordering, not a missing note, is what made one child build
+    // the entire system (docs/FINDINGS.md).
     let owned = owned_artifacts(criteria_indices, parent_criteria);
     child.push_str(&format!(
         "## Scope (Part {} of {})\n\n",
@@ -485,6 +617,53 @@ pub fn generate_child_spec_content(
         child.push_str(
             "\nAnything else in the Architecture belongs to another part. Creating it\n\
              here duplicates that part's work and makes the split pointless.\n\n",
+        );
+    }
+
+    // S4: name the other parts' artifacts explicitly, grouped by part number.
+    // "Anything else belongs to another part" is not actionable; a name and a
+    // number are. There is nothing to list when there is no other part
+    // (total_parts == 1, S6/G7) -- no split scaffolding is added in that case.
+    if total_parts > 1 {
+        for (i, group) in all_groups.iter().enumerate() {
+            let other_part_num = i + 1;
+            if other_part_num == part_num {
+                continue;
+            }
+            let theirs = owned_artifacts(group, parent_criteria);
+            if theirs.is_empty() {
+                continue;
+            }
+            child.push_str(&format!("Part {} owns:\n", other_part_num));
+            for a in &theirs {
+                child.push_str(&format!("- `{}`\n", a));
+            }
+            child.push('\n');
+        }
+    }
+
+    // Copy Architecture. It is retained verbatim because it is genuine context --
+    // deleting design rationale would silently drop the reasoning that prevents
+    // a wrong implementation (S5). For a real split (total_parts > 1), every
+    // mention of an artifact owned by a DIFFERENT part is annotated in place
+    // with that part's number (S3), so the broad description no longer reads as
+    // an unattributed build list. With total_parts == 1 there is no other part
+    // to attribute to, so nothing is added (S6): copied exactly as it always has
+    // been.
+    let architecture = extract_section(parent_content, "## Architecture");
+    if !architecture.is_empty() {
+        if total_parts > 1 {
+            child.push_str("## Architecture (full system — context, not a build list)\n\n");
+            let owners = artifact_owners(all_groups, parent_criteria);
+            child.push_str(&annotate_architecture(&architecture, part_num, &owners));
+        } else {
+            child.push_str("## Architecture\n\n");
+            child.push_str(&architecture);
+        }
+        child.push_str("\n\n");
+        child.push_str(
+            "> **Note**: the Architecture above describes the FULL system, including\n\
+             > artifacts owned by other parts. Build only what Scope lists.\n\n",
         );
     }
 

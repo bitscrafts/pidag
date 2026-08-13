@@ -3,7 +3,10 @@
 - **Project**: `/projects/pidag`
 - **Crate**: `pidag`
 - **Priority**: MEDIUM — the last item on the `docs/ARCHITECTURE.md` §6 plan, at 0.5 d.
-- **Status**: SPECIFIED — not yet dispatched
+- **Status**: IMPLEMENTED and verified 2026-08-13. Gate green.
+  **Its practical reach is limited by a separate defect found during this work**:
+  `extract_section` truncates on `###`, so many parents yield an empty Architecture
+  for the annotation to act on. See spec-41.
 - **Source**: `docs/ARCHITECTURE.md` §6 ("`split`: narrow Architecture per child"), audit U-2
   remainder, and `docs/FINDINGS.md` ("`split` divided the checklist, not the work").
 - **Depends-On**: none. `split` grouping and TDD filtering already landed.
