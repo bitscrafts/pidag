@@ -8,6 +8,8 @@
 //! for one system; run one and the split served no purpose.
 
 use pidag::split::{generate_child_spec_content, parse_exit_criteria, split_into_n_parts};
+use std::fs;
+use std::path::Path;
 
 const PARENT: &str = r#"# Spec: three modules
 
@@ -466,5 +468,351 @@ fn test_prose_line_is_not_annotated() {
         line.trim(),
         "Line five: pure prose about testing strategy, naming no file at all.",
         "prose line must be copied verbatim"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// spec-41: `extract_section` loses a third of every spec.
+//
+// `extract_section` ended a section at `remaining.find("##")` -- a substring
+// search, so a `### Functional` sub-heading (house style since spec-21)
+// terminated a `## Requirements` section before its body even began, and the
+// terminator matched inside fenced code blocks too. The start was also
+// unanchored, so a `### Requirements` sub-heading or a prose mention of
+// `` `## Architecture` `` could win over the real heading. Measured across
+// specs/*.md: 37 sections extracted as empty despite having content, 39 more
+// lost over 10%. `split` writes child specs from this output, so a child was
+// handed a brief with its Requirements silently removed.
+// ---------------------------------------------------------------------------
+
+use pidag::split::extract_section;
+
+/// The five headings `generate_child_spec_content` actually calls
+/// `extract_section` with -- the complete real-usage surface, and the same
+/// set spec-41's own measurement (37 empty / 39 truncated / 151 intact = 227)
+/// is computed over.
+const CANONICAL_SECTIONS: &[&str] = &[
+    "## Overview",
+    "## Requirements",
+    "## Architecture",
+    "## Guardrails",
+    "## TDD Contract",
+];
+
+/// Ground truth for "does this heading have non-empty content", computed
+/// independently of `extract_section` -- fence-aware, anchored to a
+/// line-exact heading match, terminated at the next `^#{1,2}\s` heading
+/// outside a fence. If this used `extract_section` itself the test would be
+/// tautological: a bug that breaks extraction would also break the
+/// "ground truth" the same way, and the two would always agree.
+fn ground_truth_has_content(spec: &str, title: &str) -> bool {
+    let mut in_fence = false;
+    let mut fence_marker = "";
+    let mut body: Option<Vec<&str>> = None;
+
+    for line in spec.lines() {
+        let trimmed = line.trim_start();
+        let is_fence = trimmed.starts_with("```") || trimmed.starts_with("~~~");
+
+        if is_fence {
+            if !in_fence {
+                in_fence = true;
+                fence_marker = &trimmed[..3];
+            } else if trimmed.starts_with(fence_marker) {
+                in_fence = false;
+            }
+            if let Some(b) = body.as_mut() {
+                b.push(line);
+            }
+            continue;
+        }
+
+        if in_fence {
+            if let Some(b) = body.as_mut() {
+                b.push(line);
+            }
+            continue;
+        }
+
+        match &mut body {
+            None => {
+                if line.trim_end() == title {
+                    body = Some(Vec::new());
+                }
+            }
+            Some(b) => {
+                let hashes = line.bytes().take_while(|&c| c == b'#').count();
+                let is_heading = (1..=2).contains(&hashes)
+                    && line
+                        .as_bytes()
+                        .get(hashes)
+                        .is_some_and(u8::is_ascii_whitespace);
+                if is_heading {
+                    break;
+                }
+                b.push(line);
+            }
+        }
+    }
+
+    body.map(|b| !b.join("\n").trim().is_empty())
+        .unwrap_or(false)
+}
+
+/// E6, the repo-wide regression guard: for every real spec in this repo, for
+/// every canonical section heading present with non-empty content, extraction
+/// must return non-empty. This is the check that would have caught the
+/// defect -- the fixture-only unit tests passed throughout because their
+/// fixtures are simple specs with no `###` sub-headings, the one input shape
+/// where the broken implementation happened to work.
+///
+/// Must fail on the current (pre-fix) implementation, reporting a count in
+/// the dozens (spec-41 measured 37).
+#[test]
+fn test_no_spec_in_repo_extracts_empty() {
+    let specs_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("specs");
+    let mut failures: Vec<String> = Vec::new();
+    let mut checked = 0usize;
+
+    let mut paths: Vec<_> = fs::read_dir(&specs_dir)
+        .expect("specs/ directory readable")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "md"))
+        .collect();
+    paths.sort();
+    assert!(
+        !paths.is_empty(),
+        "no specs/*.md found at {}; E6 has nothing to check",
+        specs_dir.display()
+    );
+
+    for path in &paths {
+        let spec = fs::read_to_string(path).expect("spec readable");
+        for &title in CANONICAL_SECTIONS {
+            let present = spec.lines().any(|l| l.trim_end() == title);
+            if !present {
+                continue;
+            }
+            if !ground_truth_has_content(&spec, title) {
+                continue; // E5: legitimately empty (heading immediately followed by another)
+            }
+            checked += 1;
+            let got = extract_section(&spec, title);
+            if got.trim().is_empty() {
+                failures.push(format!(
+                    "{}: {title:?} has content but extract_section returned empty",
+                    path.file_name().unwrap().to_string_lossy()
+                ));
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "{} of {} sections with real content extracted empty:\n{}",
+        failures.len(),
+        checked,
+        failures.join("\n")
+    );
+}
+
+/// E1a: a prose mention of the heading text (even inline-code-quoted) before
+/// the real heading must not be mistaken for the start of the section.
+#[test]
+fn test_prose_mention_does_not_start_a_section() {
+    let spec = r#"# Spec
+
+## Overview
+
+This section describes the emission order and mentions `## Architecture`
+in a bullet, purely as prose:
+
+- the code emits the `## Architecture` marker before Requirements
+
+## Architecture
+
+Real architecture content here.
+
+## Guardrails
+"#;
+    let got = extract_section(spec, "## Architecture");
+    assert_eq!(got, "Real architecture content here.");
+}
+
+/// E1b: a `### Requirements` sub-heading appearing before the real
+/// `## Requirements` heading must not win.
+#[test]
+fn test_sub_heading_does_not_start_a_section() {
+    let spec = r#"# Spec
+
+## Overview
+
+See ### Requirements below for the sub-heading style used elsewhere.
+
+## Requirements
+
+The real requirements body.
+
+## Guardrails
+"#;
+    let got = extract_section(spec, "## Requirements");
+    assert_eq!(got, "The real requirements body.");
+}
+
+/// E2a, the acceptance test: `## Requirements` followed by `### Functional`
+/// and `### Non-Functional` sub-headings must extract with BOTH sub-sections
+/// intact -- the exact shape of the 37 empty extractions.
+#[test]
+fn test_sub_headings_are_kept_in_the_body() {
+    let spec = r#"# Spec
+
+## Requirements
+
+### Functional
+
+- **F1**: does a thing.
+- **F2**: does another thing.
+
+### Non-Functional
+
+- **N1**: is fast.
+
+## Guardrails
+"#;
+    let got = extract_section(spec, "## Requirements");
+    assert!(
+        got.contains("### Functional") && got.contains("F1") && got.contains("F2"),
+        "Functional sub-section missing: {got:?}"
+    );
+    assert!(
+        got.contains("### Non-Functional") && got.contains("N1"),
+        "Non-Functional sub-section missing: {got:?}"
+    );
+}
+
+/// E2b: two consecutive `##` sections -- the first body stops at the second
+/// heading.
+#[test]
+fn test_body_ends_at_next_h2() {
+    let spec = "# Spec\n\n## Overview\n\nOverview body.\n\n## Architecture\n\nArch body.\n";
+    let got = extract_section(spec, "## Overview");
+    assert_eq!(got, "Overview body.");
+}
+
+/// E2c: `## X` followed by `# Y` -- the body stops at the `#` heading too.
+#[test]
+fn test_body_ends_at_h1() {
+    let spec = "## X\n\nX body.\n\n# Y\n\nY body.\n";
+    let got = extract_section(spec, "## X");
+    assert_eq!(got, "X body.");
+}
+
+/// E3a: a `## Exit Criteria` line inside a ``` fenced block must not
+/// terminate the section -- the body continues past it.
+#[test]
+fn test_fenced_heading_does_not_terminate() {
+    let spec = r#"## Overview
+
+Some text before the fence.
+
+```bash
+## Exit Criteria
+echo "this looks like a heading but is code"
+```
+
+More text after the fence, still part of Overview.
+
+## Architecture
+
+Arch body.
+"#;
+    let got = extract_section(spec, "## Overview");
+    assert!(
+        got.contains("## Exit Criteria") && got.contains("echo"),
+        "fenced content dropped: {got:?}"
+    );
+    assert!(
+        got.contains("More text after the fence"),
+        "extraction terminated early inside/at the fence: {got:?}"
+    );
+    assert!(
+        !got.contains("Arch body"),
+        "extraction ran past the real terminator: {got:?}"
+    );
+}
+
+/// E3b: the same, with a `~~~` fence.
+#[test]
+fn test_tilde_fence_is_honoured() {
+    let spec = r#"## Overview
+
+~~~bash
+## Exit Criteria
+echo "still code"
+~~~
+
+Trailing overview text.
+
+## Architecture
+
+Arch body.
+"#;
+    let got = extract_section(spec, "## Overview");
+    assert!(
+        got.contains("## Exit Criteria") && got.contains("Trailing overview text"),
+        "tilde-fenced content dropped or section ended early: {got:?}"
+    );
+    assert!(!got.contains("Arch body"));
+}
+
+/// E4: a spec with no such heading yields an empty string, not an error.
+#[test]
+fn test_missing_section_is_empty() {
+    let spec = "# Spec\n\n## Overview\n\nSome content.\n";
+    let got = extract_section(spec, "## Nonexistent Section");
+    assert_eq!(got, "");
+}
+
+/// E5: a heading immediately followed by the next heading yields an empty
+/// body -- "absent" and "present but empty" are not distinguished.
+#[test]
+fn test_empty_section_is_empty() {
+    let spec = "## Requirements\n## Guardrails\n\nGuardrail body.\n";
+    let got = extract_section(spec, "## Requirements");
+    assert_eq!(got, "");
+}
+
+/// Error-handling decision (spec-41): an unterminated fence must not swallow
+/// the rest of the file. Here `## Overview` opens a ``` fence that is never
+/// closed anywhere in the document. The chosen behaviour treats that
+/// unpaired marker as ordinary text rather than as a fence-open, so scanning
+/// continues normally and a later, real heading (`## Architecture`) is still
+/// found and still terminates the section it is searched for.
+#[test]
+fn test_unterminated_fence_does_not_swallow_the_rest_of_the_file() {
+    let spec = r#"## Overview
+
+```bash
+echo "this fence is never closed"
+
+## Architecture
+
+Real architecture content, after the unterminated fence.
+
+## Guardrails
+
+Guardrail body.
+"#;
+    let arch = extract_section(spec, "## Architecture");
+    assert!(
+        arch.contains("Real architecture content"),
+        "a real heading after an unterminated fence must still be found: {arch:?}"
+    );
+    let guardrails = extract_section(spec, "## Guardrails");
+    assert!(
+        guardrails.contains("Guardrail body"),
+        "extraction must not panic or hang on malformed input, and later \
+         sections must remain reachable: {guardrails:?}"
     );
 }

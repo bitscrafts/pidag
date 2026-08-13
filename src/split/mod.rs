@@ -702,16 +702,117 @@ pub fn generate_child_spec_content(
     Ok(child)
 }
 
-/// Extract a section from spec (e.g., "## Overview") returning content between
-/// this section and the next "##" marker.
-fn extract_section(spec: &str, section_title: &str) -> String {
-    if let Some(start) = spec.find(section_title) {
-        let remaining = &spec[start + section_title.len()..];
-        let end = remaining.find("##").unwrap_or(remaining.len());
-        remaining[..end].trim().to_string()
-    } else {
-        String::new()
+/// True if `line` is a level-1 or level-2 Markdown heading (`^#{1,2}\s`).
+///
+/// This is the fixed terminator rule (E2): it does not depend on the level of
+/// the section being extracted. `###` and deeper are content, never a
+/// terminator -- that is the whole defect, stated as a rule.
+fn is_h1_or_h2(line: &str) -> bool {
+    let hashes = line.bytes().take_while(|&b| b == b'#').count();
+    (1..=2).contains(&hashes)
+        && line
+            .as_bytes()
+            .get(hashes)
+            .is_some_and(u8::is_ascii_whitespace)
+}
+
+/// Extract a section from spec (e.g., "## Overview") returning the body
+/// between that heading and the next line matching `^#{1,2}\s`.
+///
+/// A hand-written, fence-aware line scan -- not a Markdown parser (N2). Three
+/// rules, each fixing one of the three independent ways the previous
+/// nine-line substring-search version was wrong (spec-41):
+///
+/// - **Anchored start** (E1): the section starts only at a line whose entire
+///   trimmed content equals `section_title`. A prose mention, an inline-code
+///   quotation, or a deeper heading such as `### Requirements` does not
+///   match -- only a line that IS the heading, verbatim, does.
+/// - **Same-or-higher-level terminator, `###`+ is content** (E2): the body
+///   ends at the next `^#{1,2}\s` line. A `### Functional` sub-heading is
+///   part of the body, not a terminator -- this is the house style of every
+///   spec from 21 onward, and the shape of most of the 37 empty extractions.
+/// - **Fence-aware** (E3): lines inside a fenced code block (``` or ~~~,
+///   opened and closed at line start, info string permitted) are never
+///   treated as a heading, for the start or the terminator, so a `##` inside
+///   a code sample can't end the section early.
+///
+/// Unterminated fence (error handling, spec-41): a fence marker with no
+/// matching close anywhere in the document is deliberately NOT treated as
+/// opening a fence at all -- it is ordinary text, and scanning continues
+/// normally past it. The alternative (toggle "in a fence" and never toggle
+/// back) would let one malformed marker anywhere in the file swallow every
+/// later heading, including the one being searched for, turning a local typo
+/// into total data loss for the rest of the document. Markers are paired by
+/// type (``` with ```, ~~~ with ~~~) in file order; if a type's count is odd,
+/// its last, unpaired occurrence is the one dropped. See
+/// `test_unterminated_fence_does_not_swallow_the_rest_of_the_file`.
+pub fn extract_section(spec: &str, section_title: &str) -> String {
+    let title = section_title.trim_end();
+    let lines: Vec<&str> = spec.lines().collect();
+
+    let backtick_total = lines
+        .iter()
+        .filter(|l| l.trim_start().starts_with("```"))
+        .count();
+    let tilde_total = lines
+        .iter()
+        .filter(|l| l.trim_start().starts_with("~~~"))
+        .count();
+    let backtick_limit = backtick_total - (backtick_total % 2);
+    let tilde_limit = tilde_total - (tilde_total % 2);
+
+    let mut backtick_seen = 0usize;
+    let mut tilde_seen = 0usize;
+    let mut in_fence = false;
+    let mut body: Option<Vec<&str>> = None;
+
+    for line in lines {
+        let trimmed = line.trim_start();
+        let is_backtick = trimmed.starts_with("```");
+        let is_tilde = trimmed.starts_with("~~~");
+
+        let toggles_fence = if is_backtick {
+            backtick_seen += 1;
+            backtick_seen <= backtick_limit
+        } else if is_tilde {
+            tilde_seen += 1;
+            tilde_seen <= tilde_limit
+        } else {
+            false
+        };
+
+        if toggles_fence {
+            in_fence = !in_fence;
+            if let Some(b) = body.as_mut() {
+                b.push(line);
+            }
+            continue;
+        }
+
+        if in_fence {
+            if let Some(b) = body.as_mut() {
+                b.push(line);
+            }
+            continue;
+        }
+
+        match &mut body {
+            None => {
+                if line.trim_end() == title {
+                    body = Some(Vec::new());
+                }
+            }
+            Some(b) => {
+                if is_h1_or_h2(line) {
+                    break;
+                }
+                b.push(line);
+            }
+        }
     }
+
+    body.map(|b| b.join("\n").trim().to_string())
+        .unwrap_or_default()
 }
 
 /// A child spec produced by [`split_for_auto`]: its path and the spec file name.

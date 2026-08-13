@@ -4,7 +4,9 @@
 - **Crate**: `pidag`
 - **Priority**: **P0 — silent data loss in `split`.** Child specs are missing the Requirements
   section outright for most well-structured parents. The contract is what goes missing.
-- **Status**: SPECIFIED — not yet dispatched
+- **Status**: IMPLEMENTED and verified 2026-08-13. Gate green. E6 failed first at
+  **37 of 226** sections, then passed at zero. Two sibling defects remain out of scope
+  and are specified separately — see spec-42.
 - **Source**: 2026-08-13. Surfaced by the spec-40 implementation, which reported that its
   annotation work "never fires visibly" on many specs because the Architecture extracted empty.
 - **Depends-On**: none. spec-40 landed; this is what limits its reach.
