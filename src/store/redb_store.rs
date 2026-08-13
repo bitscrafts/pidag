@@ -24,6 +24,14 @@ const SEQ_TABLE: TableDefinition<&str, &[u8; 8]> = TableDefinition::new("event_s
 // spec, so that is the only way to recognise a pre-existing vault.
 const META_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
 const SCHEMA_VERSION_KEY: &str = "schema_version";
+// spec-39 B7: cumulative budget counters, one row per run. Keyed by run_id
+// (unlike NODES_TABLE/NODE_TIMING_TABLE, no per-node component -- these are
+// run-wide totals). Added without a schema version bump: it is a purely
+// additive table auto-created on first write (`open_table` in a write
+// transaction creates a missing table), and absence on read means "no spend
+// recorded yet" (zero), which is correct for every vault written before
+// this spec -- no migration step is needed.
+const BUDGET_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("budget");
 /// Current on-disk vault schema version. `RedbStore::open` migrates any vault
 /// found below this version, and refuses to open one above it (a newer pidag
 /// wrote it; guessing at the shape would corrupt it).
@@ -1089,6 +1097,81 @@ impl Store for RedbStore {
                     .map_err(|e| PidagError::Store(format!("Serialization failed: {}", e)))?;
                 timings
                     .insert(key.as_str(), serialized.as_slice())
+                    .map_err(|e| PidagError::Store(format!("Insert failed: {}", e)))?;
+            }
+            write_txn
+                .commit()
+                .map_err(|e| PidagError::Store(format!("Commit failed: {}", e)))?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| PidagError::Store(format!("Task failed: {}", e)))?
+    }
+
+    /// spec-39 B7: read the persisted budget counters for a run. Absence of
+    /// the table (any vault written before this spec, or a run that never
+    /// recorded any spend) or absence of the key both mean zero -- the
+    /// correct value for "no spend recorded yet", not an error.
+    async fn get_budget(&self, run_id: &str) -> Result<super::BudgetCounters, PidagError> {
+        let db = Arc::clone(&self.db);
+        let run_id = run_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            let read_txn = db
+                .begin_read()
+                .map_err(|e| PidagError::Store(format!("Transaction failed: {}", e)))?;
+            let budget = match read_txn.open_table(BUDGET_TABLE) {
+                Ok(t) => t,
+                Err(redb::TableError::TableDoesNotExist(_)) => {
+                    return Ok(super::BudgetCounters::default());
+                }
+                Err(e) => {
+                    return Err(PidagError::Store(format!(
+                        "Failed to open budget table: {}",
+                        e
+                    )));
+                }
+            };
+            match budget
+                .get(run_id.as_str())
+                .map_err(|e| PidagError::Store(format!("Get failed: {}", e)))?
+            {
+                Some(access) => {
+                    let bytes = access.value().to_vec();
+                    let counters: super::BudgetCounters = bincode::deserialize(&bytes)
+                        .map_err(|e| PidagError::Store(format!("Deserialization failed: {}", e)))?;
+                    Ok(counters)
+                }
+                None => Ok(super::BudgetCounters::default()),
+            }
+        })
+        .await
+        .map_err(|e| PidagError::Store(format!("Task failed: {}", e)))?
+    }
+
+    /// spec-39 B7: persist the latest cumulative budget counters for a run.
+    /// `open_table` in a write transaction creates `BUDGET_TABLE` on first
+    /// use, so this needs no prior migration step even against a vault
+    /// written before this spec.
+    async fn put_budget(
+        &self,
+        run_id: &str,
+        counters: &super::BudgetCounters,
+    ) -> Result<(), PidagError> {
+        let db = Arc::clone(&self.db);
+        let run_id = run_id.to_string();
+        let counters = *counters;
+        tokio::task::spawn_blocking(move || {
+            let write_txn = db
+                .begin_write()
+                .map_err(|e| PidagError::Store(format!("Transaction failed: {}", e)))?;
+            {
+                let mut budget = write_txn.open_table(BUDGET_TABLE).map_err(|e| {
+                    PidagError::Store(format!("Failed to open budget table: {}", e))
+                })?;
+                let serialized = bincode::serialize(&counters)
+                    .map_err(|e| PidagError::Store(format!("Serialization failed: {}", e)))?;
+                budget
+                    .insert(run_id.as_str(), serialized.as_slice())
                     .map_err(|e| PidagError::Store(format!("Insert failed: {}", e)))?;
             }
             write_txn

@@ -124,4 +124,16 @@ impl Store for RedbStorePool {
     ) -> Result<Vec<(String, NodeTiming)>, PidagError> {
         self.open()?.list_node_timings(run_id).await
     }
+
+    async fn get_budget(&self, run_id: &str) -> Result<super::BudgetCounters, PidagError> {
+        self.open()?.get_budget(run_id).await
+    }
+
+    async fn put_budget(
+        &self,
+        run_id: &str,
+        counters: &super::BudgetCounters,
+    ) -> Result<(), PidagError> {
+        self.open()?.put_budget(run_id, counters).await
+    }
 }

@@ -545,6 +545,7 @@ async fn test_worker_receives_interpolated_prompt() {
                 success: true,
                 output: output.to_string(),
                 retryable: false,
+                usage: None,
             })
         }
     }

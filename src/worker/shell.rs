@@ -59,6 +59,7 @@ impl Worker for RealShellWorker {
                     success: false,
                     output: format!("spawn failed: {err}"),
                     retryable: false,
+                    usage: None,
                 });
             }
         };
@@ -72,6 +73,7 @@ impl Worker for RealShellWorker {
                     success: false,
                     output: format!("process error: {err}"),
                     retryable: false,
+                    usage: None,
                 });
             }
             Err(_elapsed) => {
@@ -79,6 +81,7 @@ impl Worker for RealShellWorker {
                     success: false,
                     output: "timed out waiting for shell command".to_string(),
                     retryable: false,
+                    usage: None,
                 });
             }
         };
@@ -99,6 +102,7 @@ impl Worker for RealShellWorker {
             success,
             output: combined_output,
             retryable: false,
+            usage: None,
         })
     }
 }

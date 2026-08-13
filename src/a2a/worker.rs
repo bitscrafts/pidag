@@ -160,6 +160,7 @@ impl A2aWorker {
                     success: false,
                     output: format!("spawn failed: {err}"),
                     retryable: false,
+                    usage: None,
                 });
             }
         };
@@ -176,6 +177,7 @@ impl A2aWorker {
                 success: false,
                 output: "a2a poll timed out".to_string(),
                 retryable: false,
+                usage: None,
             });
         }
 
@@ -187,6 +189,7 @@ impl A2aWorker {
                     success: false,
                     output: format!("process error: {err}"),
                     retryable: false,
+                    usage: None,
                 });
             }
             Err(_elapsed) => {
@@ -194,6 +197,7 @@ impl A2aWorker {
                     success: false,
                     output: "a2a request timed out".to_string(),
                     retryable: false,
+                    usage: None,
                 });
             }
         };
@@ -246,6 +250,7 @@ impl Worker for A2aWorker {
                 success: false,
                 output: combined,
                 retryable,
+                usage: None,
             });
         }
 
@@ -256,6 +261,7 @@ impl Worker for A2aWorker {
                     success: false,
                     output: format!("failed to parse a2a response: {err}"),
                     retryable: false,
+                    usage: None,
                 });
             }
         };
@@ -282,12 +288,14 @@ impl Worker for A2aWorker {
                     success: true,
                     output: text,
                     retryable: false,
+                    usage: None,
                 })
             }
             "failed" => Ok(WorkerOutput {
                 success: false,
                 output: "a2a task failed".to_string(),
                 retryable: false,
+                usage: None,
             }),
             "working" => {
                 let task_id = match task_id {
@@ -297,6 +305,7 @@ impl Worker for A2aWorker {
                             success: false,
                             output: "a2a working state without task id".to_string(),
                             retryable: false,
+                            usage: None,
                         });
                     }
                 };
@@ -314,6 +323,7 @@ impl Worker for A2aWorker {
                             success: false,
                             output: "a2a poll timed out".to_string(),
                             retryable: false,
+                            usage: None,
                         });
                     }
                     tokio::time::sleep(self.poll_interval).await;
@@ -331,6 +341,7 @@ impl Worker for A2aWorker {
                             success: false,
                             output: combined,
                             retryable,
+                            usage: None,
                         });
                     }
 
@@ -341,6 +352,7 @@ impl Worker for A2aWorker {
                                 success: false,
                                 output: format!("failed to parse a2a poll response: {err}"),
                                 retryable: false,
+                                usage: None,
                             });
                         }
                     };
@@ -362,6 +374,7 @@ impl Worker for A2aWorker {
                                 success: true,
                                 output: text,
                                 retryable: false,
+                                usage: None,
                             });
                         }
                         "failed" => {
@@ -369,6 +382,7 @@ impl Worker for A2aWorker {
                                 success: false,
                                 output: "a2a task failed".to_string(),
                                 retryable: false,
+                                usage: None,
                             });
                         }
                         "working" => {
@@ -380,6 +394,7 @@ impl Worker for A2aWorker {
                                 success: false,
                                 output: format!("unknown a2a state: {other}"),
                                 retryable: false,
+                                usage: None,
                             });
                         }
                     }
@@ -389,6 +404,7 @@ impl Worker for A2aWorker {
                 success: false,
                 output: format!("unknown a2a state: {other}"),
                 retryable: false,
+                usage: None,
             }),
         }
     }

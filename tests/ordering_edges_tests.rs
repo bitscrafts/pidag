@@ -115,6 +115,7 @@ impl Worker for DelayWorker {
             success: true,
             output: format!("output from {}", node_id),
             retryable: false,
+            usage: None,
         })
     }
 }

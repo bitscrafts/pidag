@@ -194,6 +194,7 @@ impl Worker for MockWorker {
             success: true,
             output: "success".to_string(),
             retryable: false,
+            usage: None,
         })
     }
 }
@@ -229,6 +230,7 @@ impl Worker for CountingWorker {
             success: true,
             output: format!("done:{}", node_id),
             retryable: false,
+            usage: None,
         })
     }
 }
@@ -475,6 +477,7 @@ async fn test_scheduler_skips_done_nodes() {
         blocked_nodes: Default::default(),
         stale_running: Default::default(),
         outputs: Default::default(),
+        budget: Default::default(),
     };
     let sink: Box<dyn EventSink> = Box::new(pidag::VecSink::new());
     let mut sched = Scheduler::with_checkpoint(dag.clone(), Box::new(worker), sink, 4, cp);
@@ -524,6 +527,7 @@ async fn test_scheduler_decrements_indegree() {
         blocked_nodes: Default::default(),
         stale_running: Default::default(),
         outputs: Default::default(),
+        budget: Default::default(),
     };
     let sink: Box<dyn EventSink> = Box::new(pidag::VecSink::new());
     let mut sched = Scheduler::with_checkpoint(dag.clone(), Box::new(worker), sink, 4, cp);
@@ -559,6 +563,7 @@ async fn test_scheduler_resets_stale_running() {
             s
         },
         outputs: Default::default(),
+        budget: Default::default(),
     };
     let sink: Box<dyn EventSink> = Box::new(pidag::VecSink::new());
     let mut sched = Scheduler::with_checkpoint(dag.clone(), Box::new(worker), sink, 4, cp);
@@ -747,6 +752,7 @@ async fn test_with_checkpoint_skips_completed_prefix() {
         blocked_nodes: Default::default(),
         stale_running: Default::default(),
         outputs: Default::default(),
+        budget: Default::default(),
     };
     let sink: Box<dyn EventSink> = Box::new(pidag::VecSink::new());
     let mut sched = Scheduler::with_checkpoint(dag, Box::new(worker), sink, 4, cp);

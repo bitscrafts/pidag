@@ -33,6 +33,13 @@ pub struct MockBackend {
     capabilities: MockCapabilities,
     /// If true, prompt() will fail with a transport error for testing error handling.
     fail_on_prompt: bool,
+    /// spec-39: usage to attach to every `AgentReply` this backend's
+    /// sessions produce. `None` means the reply carries no usage at all --
+    /// which is a legitimate, distinct-from-`token_usage: false` scenario
+    /// (B4b: a backend that *claims* the capability but fails to report on
+    /// a given call). Defaults to `None` so every pre-spec-39 test (none of
+    /// which cares about usage) is unaffected.
+    usage_per_call: Option<crate::backend::TokenUsage>,
 }
 
 impl MockBackend {
@@ -41,6 +48,7 @@ impl MockBackend {
         Self {
             capabilities: MockCapabilities::default(),
             fail_on_prompt: false,
+            usage_per_call: None,
         }
     }
 
@@ -49,6 +57,7 @@ impl MockBackend {
         Self {
             capabilities,
             fail_on_prompt: false,
+            usage_per_call: None,
         }
     }
 
@@ -60,6 +69,14 @@ impl MockBackend {
     /// Configure this backend to fail on prompt (for testing error handling).
     pub fn with_prompt_failure(mut self) -> Self {
         self.fail_on_prompt = true;
+        self
+    }
+
+    /// spec-39: attach a fixed `TokenUsage` to every reply this backend's
+    /// sessions produce (B1a, B3). Test-only knob -- a real backend reports
+    /// whatever usage the provider actually returned, not a constant.
+    pub fn with_usage_per_call(mut self, usage: crate::backend::TokenUsage) -> Self {
+        self.usage_per_call = Some(usage);
         self
     }
 }
@@ -98,6 +115,7 @@ impl AgentBackend for MockBackend {
             turn_count: Arc::new(Mutex::new(0)),
             closed: Arc::new(Mutex::new(false)),
             fail_on_prompt: self.fail_on_prompt,
+            usage_per_call: self.usage_per_call.clone(),
         }))
     }
 }
@@ -111,6 +129,8 @@ pub struct MockSession {
     turn_count: Arc<Mutex<usize>>,
     closed: Arc<Mutex<bool>>,
     fail_on_prompt: bool,
+    /// spec-39: see `MockBackend::usage_per_call`.
+    usage_per_call: Option<crate::backend::TokenUsage>,
 }
 
 #[async_trait]
@@ -145,7 +165,12 @@ impl AgentSession for MockSession {
         Ok(AgentReply {
             text: reply_text,
             events: None,
-            usage: None,
+            // spec-39 B1a/B3: attach the configured per-call usage, if any.
+            // A backend that declares `token_usage` in its capabilities but
+            // was NOT configured with `with_usage_per_call` still returns
+            // `None` here -- exercising B4b (a capable backend that fails
+            // to report on a given call) rather than papering over it.
+            usage: self.usage_per_call.clone(),
         })
     }
 
@@ -191,6 +216,7 @@ impl AgentSession for MockSession {
             turn_count: Arc::new(Mutex::new(0)),
             closed: Arc::new(Mutex::new(false)),
             fail_on_prompt: self.fail_on_prompt,
+            usage_per_call: self.usage_per_call.clone(),
         }))
     }
 

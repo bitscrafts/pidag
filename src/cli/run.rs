@@ -1,5 +1,6 @@
 //! `pidag run` command - execute a DAG from JSON
 
+use crate::scheduler::BudgetLimits;
 use crate::{
     CompositeSink, Dag, JsonlSink, NodeStatus, RedbSink, RedbStore, Scheduler, Store, VecSink,
 };
@@ -27,6 +28,10 @@ pub async fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut resume = false;
     let mut fresh = false;
     let mut retry_failed = false;
+    // spec-39: budget ceilings. `None` (the default, no flag) means
+    // unbounded -- byte-identical to pre-spec-39 behaviour (N1, B10).
+    let mut max_model_calls: Option<u64> = None;
+    let mut max_tokens: Option<u64> = None;
 
     // Parse optional arguments
     let mut i = 1;
@@ -75,12 +80,52 @@ pub async fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 retry_failed = true;
                 i += 1;
             }
+            "--max-model-calls" => {
+                if i + 1 < args.len() {
+                    match args[i + 1].parse::<u64>() {
+                        Ok(n) => max_model_calls = Some(n),
+                        Err(_) => {
+                            eprintln!(
+                                "error: --max-model-calls requires a non-negative integer, got '{}'",
+                                args[i + 1]
+                            );
+                            std::process::exit(1);
+                        }
+                    }
+                    i += 2;
+                } else {
+                    eprintln!("error: --max-model-calls requires an argument");
+                    std::process::exit(1);
+                }
+            }
+            "--max-tokens" => {
+                if i + 1 < args.len() {
+                    match args[i + 1].parse::<u64>() {
+                        Ok(n) => max_tokens = Some(n),
+                        Err(_) => {
+                            eprintln!(
+                                "error: --max-tokens requires a non-negative integer, got '{}'",
+                                args[i + 1]
+                            );
+                            std::process::exit(1);
+                        }
+                    }
+                    i += 2;
+                } else {
+                    eprintln!("error: --max-tokens requires an argument");
+                    std::process::exit(1);
+                }
+            }
             _ => {
                 eprintln!("error: unknown option: {}", args[i]);
                 std::process::exit(1);
             }
         }
     }
+    let budget_limits = BudgetLimits {
+        max_model_calls,
+        max_tokens,
+    };
 
     // Read and parse DAG JSON
     let dag_json =
@@ -103,6 +148,47 @@ pub async fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // Validate DAG
     dag.validate()
         .map_err(|e| format!("DAG validation failed: {}", e))?;
+
+    // spec-39 B4/B4a/G5: `--max-tokens` fails closed on a backend that
+    // cannot report usage -- a STARTUP error, before the vault is even
+    // opened, so the run truly never starts. Silently ignoring the flag
+    // would leave the operator believing they are covered when they are
+    // not, which this codebase has shipped before (see spec-39 Overview).
+    if max_tokens.is_some() {
+        let config_path = vault_path
+            .parent()
+            .map(|p| p.join("config.toml"))
+            .unwrap_or_else(|| PathBuf::from(".pidag/config.toml"));
+        let config = crate::Config::load(&config_path).unwrap_or_default();
+        match crate::worker::resolve_backend_capabilities(&config) {
+            Ok(Some((name, caps))) if !caps.token_usage => {
+                eprintln!(
+                    "error: --max-tokens requires a backend that reports token usage, but \
+                     backend '{}' does not declare the token_usage capability. Use \
+                     --max-model-calls instead, which works on every worker path.",
+                    name
+                );
+                std::process::exit(1);
+            }
+            Ok(None) => {
+                eprintln!(
+                    "error: --max-tokens requires a backend that reports token usage, but no \
+                     agent backend is configured (LLM nodes default to the `pi -p` CLI print \
+                     mode, which reports no usage at all). Configure [agent] backend in \
+                     config.toml, or use --max-model-calls instead, which works on every \
+                     worker path."
+                );
+                std::process::exit(1);
+            }
+            Ok(Some(_)) => {
+                // Backend declares token_usage: proceed.
+            }
+            Err(e) => {
+                eprintln!("error: failed to resolve agent backend: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
 
     // Open vault store. Use `RedbStore` directly (persistent lock for the
     // entire run duration) to avoid the per-operation open/close race
@@ -278,8 +364,11 @@ pub async fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         None => Scheduler::new(dag.clone(), worker, composite_sink, concurrency),
     };
 
-    // Run the DAG
-    let mut report = match scheduler.run(allow_paid).await {
+    // Run the DAG. spec-39 B2/B3/B7: thread the parsed ceilings through so
+    // they are actually enforced -- `run(allow_paid)` alone would silently
+    // ignore `--max-tokens`/`--max-model-calls` after all the parsing and
+    // startup validation above.
+    let mut report = match scheduler.run_with_budget(allow_paid, budget_limits).await {
         Ok(r) => r,
         Err(e) => {
             eprintln!("error during DAG execution: {}", e);
@@ -314,13 +403,23 @@ pub async fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    // Update run metadata with completion info
-    let completed_at = chrono::Utc::now().to_rfc3339();
+    // Update run metadata with completion info.
+    //
+    // spec-39 B6: on a budget breach, `completed_at` MUST stay `None` --
+    // `load_checkpoint` (spec-08) treats a `Some(completed_at)` run as
+    // `AlreadyDone` and serves a cached report instead of resuming, which
+    // would make a raised ceiling unable to ever dispatch the remaining
+    // nodes. A breach is a checkpoint like any other termination, not a
+    // completion.
     let final_run_meta = crate::RunMeta {
         run_id: run_id.clone(),
         dag_json,
         started_at,
-        completed_at: Some(completed_at),
+        completed_at: if report.breach.is_some() {
+            None
+        } else {
+            Some(chrono::Utc::now().to_rfc3339())
+        },
         successful_nodes: report
             .node_states
             .iter()
@@ -344,6 +443,29 @@ pub async fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         run_id,
         vault_path.display()
     );
+
+    // spec-39 B5/B5b: a budget breach is reported and exits with a DISTINCT
+    // non-zero status (3) from an ordinary node failure (1) -- they demand
+    // different operator responses (raise-and-resume vs fix-and-resume;
+    // error-handling expectations). Checked before `report.failed` because
+    // a breach mid-run can also leave nodes in `failed` (e.g. one already
+    // in flight when the ceiling tripped) and the breach is the more
+    // specific, actionable diagnosis.
+    //
+    // B5: nodes already in flight when the breach was detected were allowed
+    // to finish -- they cannot be cancelled mid-call (Worker trait has no
+    // cancellation seam) -- so the run may overshoot the ceiling by at most
+    // the in-flight set (bounded by `--concurrency`). See --help and README
+    // for this documented, deliberate limitation.
+    if let Some(breach) = &report.breach {
+        eprintln!("budget ceiling breached: {}", breach.message);
+        eprintln!(
+            "cumulative: {} model call(s), {} token(s). Raise the ceiling and resume with \
+             --resume --run-id {} to continue; no completed work is lost (spec-39 B6/B7).",
+            report.model_calls, report.total_tokens, run_id
+        );
+        std::process::exit(3);
+    }
 
     // Exit with appropriate code
     if report.failed.is_empty() {

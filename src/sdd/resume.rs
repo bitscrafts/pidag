@@ -111,6 +111,11 @@ pub async fn load_checkpoint(
             })
             .collect();
 
+        // spec-39 B9: a cached AlreadyDone report still states the run's
+        // cumulative counters, sourced from the same persisted totals a
+        // fresh run would read (B7).
+        let budget = store.get_budget(run_id).await?;
+
         let report = RunReport {
             node_states,
             failed: terminal_set
@@ -124,6 +129,9 @@ pub async fn load_checkpoint(
                 })
                 .collect(),
             store_write_failures: 0,
+            model_calls: budget.model_calls,
+            total_tokens: budget.total_tokens,
+            breach: None,
         };
 
         return Ok(ResumeDecision::AlreadyDone {
@@ -183,6 +191,12 @@ pub async fn load_checkpoint(
         }
     }
 
+    // spec-39 B7: carry the prior run's cumulative budget counters forward
+    // so a resumed run continues from where it stopped rather than
+    // resetting to zero -- a ceiling already breached must not become
+    // enforceable again just by resuming.
+    let budget = store.get_budget(run_id).await?;
+
     Ok(ResumeDecision::Resume {
         checkpoint: Checkpoint {
             run_id: run_id.to_string(),
@@ -191,6 +205,7 @@ pub async fn load_checkpoint(
             blocked_nodes,
             stale_running,
             outputs,
+            budget,
         },
     })
 }

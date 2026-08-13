@@ -4,7 +4,9 @@
 - **Crate**: `pidag`
 - **Priority**: HIGH — `docs/ARCHITECTURE.md` §6 lists it against "the $50k-at-scale caution".
   `--allow-paid` is a boolean, not a limit: today nothing bounds a run.
-- **Status**: SPECIFIED — not yet dispatched
+- **Status**: IMPLEMENTED and verified 2026-08-13. Gate green. B4b narrowed: a capable
+  backend returning no usage errors only when `--max-tokens` is set, since an unset
+  ceiling bounds nothing and so has nothing to fail closed on.
 - **Source**: `docs/ARCHITECTURE.md` §6, amended. **The plan's `--max-spend` at 0.5 d was
   wrong** — see "What the plan got wrong" below. Unit confirmed with the user 2026-08-12.
 - **Depends-On**: spec-37 (critic) and spec-38 (`for_each`/quorum) — both landed, and both

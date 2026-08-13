@@ -80,6 +80,53 @@ pub struct RunReport {
     pub node_states: Vec<NodeState>,
     pub failed: Vec<String>,
     pub store_write_failures: usize,
+    /// Cumulative model-consuming dispatches observed this run, continued
+    /// from any prior (resumed) run (spec-39, B7/B9). Visible whether or
+    /// not a ceiling was set.
+    #[serde(default)]
+    pub model_calls: u64,
+    /// Cumulative `total_tokens` observed this run, continued from any
+    /// prior (resumed) run (spec-39, B7/B9). Only backends reporting usage
+    /// contribute; see `WorkerOutput.usage`.
+    #[serde(default)]
+    pub total_tokens: u64,
+    /// `Some` only when a budget ceiling stopped the run from dispatching
+    /// further nodes (spec-39, B5). Distinct from `failed`: a breach is
+    /// raise-and-resume, a node failure is fix-and-resume (error-handling
+    /// expectations) -- callers must not fold this into `failed`.
+    #[serde(default)]
+    pub breach: Option<BudgetBreach>,
+}
+
+/// Cumulative budget counters for a run (spec-39, B7/B9). Persisted in the
+/// vault (not just in memory) via `Store::get_budget`/`put_budget` -- B7's
+/// premise: a ceiling already breached must not reset to zero on resume,
+/// or it would bound nothing.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BudgetCounters {
+    pub model_calls: u64,
+    pub total_tokens: u64,
+}
+
+/// Budget ceilings for a run (spec-39, B2-B4). `None` means "no ceiling" --
+/// `BudgetLimits::default()` reproduces exactly today's unbounded behaviour
+/// (N1, B10).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BudgetLimits {
+    pub max_model_calls: Option<u64>,
+    pub max_tokens: Option<u64>,
+}
+
+/// Why a run stopped early on a budget ceiling (spec-39, B5). Distinct from
+/// an ordinary node failure: `RunReport.breach` is `Some` only on this
+/// path, so a caller (the CLI) can choose a distinct exit status/message
+/// (B5b) instead of folding it into `RunReport.failed`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BudgetBreach {
+    /// Names which ceiling, the figure reached, the limit, and the node
+    /// involved (error-handling expectations) -- e.g. "budget ceiling
+    /// breached: max-tokens reached 260 (limit 250) after node 'n3'".
+    pub message: String,
 }
 
 /// Checkpoint state loaded from vault on resume (Spec-08).
@@ -100,6 +147,12 @@ pub struct Checkpoint {
     pub stale_running: HashSet<String>,   // state == Running (crash-stale, reset to Pending)
     #[serde(default)]
     pub outputs: HashMap<String, String>, // terminal node id -> captured output (I7)
+    /// Budget counters carried over from the prior (interrupted) run
+    /// (spec-39, B7). `#[serde(default)]` keeps a pre-spec-39 checkpoint
+    /// loading unchanged (N1) -- absence means "no prior spend", which is
+    /// correct for any run that predates budget ceilings.
+    #[serde(default)]
+    pub budget: BudgetCounters,
 }
 
 /// Authoritative, shareable snapshot of run progress. Updated on every
@@ -232,6 +285,20 @@ impl Scheduler {
     /// a subsequent `await_dag`/`wait_any` call on the same `Scheduler`
     /// observes completion immediately instead of starting a second run.
     pub async fn run(&mut self, allow_paid: bool) -> Result<RunReport, PidagError> {
+        self.run_with_budget(allow_paid, BudgetLimits::default())
+            .await
+    }
+
+    /// Run the DAG to completion with budget ceilings (spec-39, N2: widens
+    /// `run` rather than changing its signature, so every existing caller
+    /// of `run(allow_paid)` is untouched and behaves identically -- N1,
+    /// B10). `limits` of `BudgetLimits::default()` (both `None`) is
+    /// byte-identical to `run()`.
+    pub async fn run_with_budget(
+        &mut self,
+        allow_paid: bool,
+        limits: BudgetLimits,
+    ) -> Result<RunReport, PidagError> {
         self.started = true;
         Self::execute(
             self.dag.clone(),
@@ -241,6 +308,7 @@ impl Scheduler {
             Arc::clone(&self.inner),
             allow_paid,
             self.checkpoint.as_ref(),
+            limits,
         )
         .await
     }
@@ -301,6 +369,7 @@ impl Scheduler {
                 inner,
                 allow_paid,
                 checkpoint.as_ref(),
+                BudgetLimits::default(),
             )
             .await;
         });

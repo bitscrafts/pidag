@@ -64,6 +64,37 @@ defect: on resume the tree is already dirty, so "is the tree dirty" is satisfied
 node runs — and a node that did nothing verified green. See
 [docs/FINDINGS.md](docs/FINDINGS.md).
 
+## Budget ceilings
+
+`--allow-paid` decides *whether* paid models may be used, not *how much*. `pidag run` also
+accepts two ceilings, counted in units pidag can actually observe -- not dollars, which it
+has no honest price table for (see `specs/39-budget-ceilings.md`):
+
+```bash
+pidag run dag.json --max-model-calls 50   # abort once model-consuming dispatches would exceed 50
+pidag run dag.json --max-tokens 200000    # abort once cumulative reported tokens would exceed 200000
+```
+
+- `--max-model-calls` works on every worker path: shell and `quorum` nodes are arithmetic,
+  not a model call, and are never counted.
+- `--max-tokens` only works against a backend that reports usage. If the configured backend
+  doesn't (the default `pi -p` print-mode path never does), pidag refuses to start rather
+  than silently not enforcing the ceiling.
+- Both counters persist in the vault and accumulate across `--resume` — a ceiling already
+  breached does not reset to zero just because the run resumed.
+- A `Verify::Critic` dispatch and every `for_each` child both count towards these ceilings;
+  they are real model calls.
+
+**The ceiling bounds what is *started*, not what is in flight.** pidag cannot cancel a model
+call mid-request, so on breach it stops dispatching further nodes but lets whatever is
+already running finish. **A run may therefore overshoot the ceiling by at most the in-flight
+set — i.e. up to `--concurrency` extra dispatches.** This is a real limitation, not a bug:
+adding mid-call cancellation is out of scope for this mechanism.
+
+On breach, `pidag run` exits with status `3` — distinct from an ordinary node failure's
+status `1`, because the right response differs: raise the ceiling and resume, versus fix the
+node and resume.
+
 ## Requirements
 
 - **Rust stable** — that is all you need to build, run shell-node DAGs, and use the UI.

@@ -12,7 +12,7 @@ type EventMap = Arc<Mutex<HashMap<String, Vec<(u64, Event)>>>>;
 pub mod legacy;
 pub mod redb_pool;
 pub mod redb_store;
-pub use crate::scheduler::NodeStatus;
+pub use crate::scheduler::{BudgetCounters, NodeStatus};
 pub use redb_pool::RedbStorePool;
 pub use redb_store::RedbStore;
 
@@ -265,6 +265,41 @@ pub trait Store: Send + Sync {
         self.put_node_timing(run_id, node_id, &timing).await?;
         Ok(())
     }
+
+    /// Read the cumulative budget counters persisted for a run (spec-39,
+    /// B7). Returns `BudgetCounters::default()` (zero) for a run that has
+    /// never recorded any -- including every run predating this spec, and
+    /// any `Store` implementation that does not override this default (a
+    /// third-party or test double never wired to budget ceilings).
+    async fn get_budget(&self, run_id: &str) -> Result<BudgetCounters, PidagError> {
+        let _ = run_id;
+        Ok(BudgetCounters::default())
+    }
+
+    /// Persist the cumulative budget counters for a run (spec-39, B7). The
+    /// default implementation is a no-op -- overridden by `RedbStore` (and
+    /// `MockStore`, for tests) so the counters actually survive a resume.
+    /// A `Store` that never overrides this simply never bounds anything
+    /// across resumes, which is only correct for a store nothing ever
+    /// passes budget ceilings against.
+    async fn put_budget(&self, run_id: &str, counters: &BudgetCounters) -> Result<(), PidagError> {
+        let _ = (run_id, counters);
+        Ok(())
+    }
+
+    /// Project a `BudgetUpdated` event: append it, then persist the latest
+    /// counters snapshot. Default implementation calls the individual
+    /// methods; `RedbStore` may combine into one transaction.
+    async fn project_budget_updated(
+        &self,
+        run_id: &str,
+        ev: &Event,
+        counters: &BudgetCounters,
+    ) -> Result<(), PidagError> {
+        self.append_event(run_id, ev).await?;
+        self.put_budget(run_id, counters).await?;
+        Ok(())
+    }
 }
 
 /// MockStore for testing: stores everything in memory.
@@ -275,6 +310,7 @@ pub struct MockStore {
     artifacts: Arc<Mutex<HashMap<(String, String), String>>>,
     event_seq: Arc<Mutex<HashMap<String, u64>>>,
     timings: Arc<Mutex<HashMap<(String, String), NodeTiming>>>,
+    budgets: Arc<Mutex<HashMap<String, BudgetCounters>>>,
 }
 
 impl Default for MockStore {
@@ -286,6 +322,7 @@ impl Default for MockStore {
             artifacts: Arc::new(Mutex::new(HashMap::new())),
             event_seq: Arc::new(Mutex::new(HashMap::new())),
             timings: Arc::new(Mutex::new(HashMap::new())),
+            budgets: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -469,5 +506,23 @@ impl Store for MockStore {
             .filter(|((rid, _), _)| rid == run_id)
             .map(|((_, nid), t)| (nid.clone(), t.clone()))
             .collect())
+    }
+
+    async fn get_budget(&self, run_id: &str) -> Result<BudgetCounters, PidagError> {
+        Ok(self
+            .budgets
+            .lock()
+            .await
+            .get(run_id)
+            .copied()
+            .unwrap_or_default())
+    }
+
+    async fn put_budget(&self, run_id: &str, counters: &BudgetCounters) -> Result<(), PidagError> {
+        self.budgets
+            .lock()
+            .await
+            .insert(run_id.to_string(), *counters);
+        Ok(())
     }
 }

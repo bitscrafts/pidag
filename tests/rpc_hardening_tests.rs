@@ -321,7 +321,7 @@ fn create_test_shell_dag() -> Dag {
         ],
         "metadata": {
             "spec": "spec-22",
-            "project": "/projects/pidag",
+            "project": "/example/project",
             "version": "1.0.0"
         }
     }))

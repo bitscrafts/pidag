@@ -62,21 +62,25 @@ impl Worker for ScriptedWorker {
                 success: true,
                 output: out,
                 retryable: false,
+                usage: None,
             }),
             Some(Script::RetryableFailure(out)) => Ok(WorkerOutput {
                 success: false,
                 output: out,
                 retryable: true,
+                usage: None,
             }),
             Some(Script::RealFailure(out)) => Ok(WorkerOutput {
                 success: false,
                 output: out,
                 retryable: false,
+                usage: None,
             }),
             None => Ok(WorkerOutput {
                 success: false,
                 output: format!("no script for {key:?}"),
                 retryable: false,
+                usage: None,
             }),
         }
     }

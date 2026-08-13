@@ -90,6 +90,7 @@ impl Worker for AgentWorker {
                     success: false,
                     output: format!("Failed to open session: {}", error_text),
                     retryable: classify_retryable(&error_text),
+                    usage: None,
                 });
             }
         };
@@ -113,6 +114,7 @@ impl Worker for AgentWorker {
                     success: false,
                     output: format!("Prompt failed: {}", error_text),
                     retryable: classify_retryable(&error_text),
+                    usage: None,
                 });
             }
         };
@@ -121,10 +123,23 @@ impl Worker for AgentWorker {
         let _ = session.close().await;
 
         // Map the successful reply to WorkerOutput.
+        //
+        // B4b/G6: `reply.usage` is passed through as-is, including `None`
+        // from a backend that claims the `token_usage` capability but
+        // failed to report on this particular call. It is deliberately NOT
+        // turned into a `Err` here: `Worker::run`'s `Err` path is swallowed
+        // by the scheduler's per-attempt timeout wrapper
+        // (`run_with_node_timeout`) into "no usable result, try again" --
+        // which would silently retry or fail over to another model instead
+        // of naming the real problem. The scheduler's budget accumulator
+        // (`BudgetInner::record_usage`, `src/scheduler/execute.rs`) is what
+        // turns a `None` usage under an active `--max-tokens` ceiling into
+        // a hard, node-naming breach -- never a silent zero.
         Ok(WorkerOutput {
             success: true,
             output: reply.text,
             retryable: false,
+            usage: reply.usage,
         })
     }
 }

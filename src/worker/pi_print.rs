@@ -164,6 +164,7 @@ impl Worker for PiPrintWorker {
                     success: false,
                     output: format!("spawn failed: {err}"),
                     retryable: false,
+                    usage: None,
                 });
             }
         };
@@ -177,6 +178,7 @@ impl Worker for PiPrintWorker {
                     success: false,
                     output: format!("process error: {err}"),
                     retryable: false,
+                    usage: None,
                 });
             }
             Err(_elapsed) => {
@@ -184,6 +186,7 @@ impl Worker for PiPrintWorker {
                     success: false,
                     output: "timed out waiting for pi".to_string(),
                     retryable: false,
+                    usage: None,
                 });
             }
         };
@@ -207,6 +210,7 @@ impl Worker for PiPrintWorker {
                 success: false,
                 output: error_detail,
                 retryable: classify_retryable(&combined),
+                usage: None,
             });
         }
 
@@ -219,16 +223,19 @@ impl Worker for PiPrintWorker {
                 success: true,
                 output: t,
                 retryable: false,
+                usage: None,
             }),
             None if !plain.is_empty() => Ok(WorkerOutput {
                 success: true,
                 output: plain.to_string(),
                 retryable: false,
+                usage: None,
             }),
             _ => Ok(WorkerOutput {
                 success: false,
                 output: "empty output from pi".to_string(),
                 retryable: classify_retryable(&combined),
+                usage: None,
             }),
         }
     }

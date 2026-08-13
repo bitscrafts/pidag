@@ -4,7 +4,10 @@
 //! transition is published to `Inner` so `await_dag`/`wait_any` callers
 //! never need to poll.
 
-use super::{Inner, NodeState, NodeStatus, RunReport, Scheduler};
+use super::{
+    BudgetBreach, BudgetCounters, BudgetLimits, Inner, NodeState, NodeStatus, RunReport, Scheduler,
+};
+use crate::backend::TokenUsage;
 use crate::core::dag::{Dag, ModelRef, Node, QuorumConfig, Verify};
 use crate::core::error::PidagError;
 use crate::core::event::{Event, EventSink};
@@ -14,12 +17,197 @@ use std::future::Future;
 use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
 use std::time::Duration;
 use tokio::process::Command;
 use tokio::sync::{Semaphore, mpsc};
+
+/// Shared, mutable budget-tracking state for one `execute()` run (spec-39).
+/// Wrapped in a `std::sync::Mutex` (never held across an `.await`) so both
+/// the scheduler's own dispatch loop and every concurrently-spawned node
+/// task -- including a nested critic dispatch -- can safely check-and
+/// -account against the SAME counters. This is what makes the
+/// `--max-model-calls` gate synchronous and serialized: a burst of
+/// simultaneously-ready independent nodes cannot all slip past the ceiling
+/// before any of them reports back (B2a), and a critic dispatch is gated
+/// through the exact same path as a top-level node (B8a).
+type BudgetHandle = Arc<Mutex<BudgetInner>>;
+
+struct BudgetInner {
+    counters: BudgetCounters,
+    limits: BudgetLimits,
+    breach: Option<BudgetBreach>,
+}
+
+impl BudgetInner {
+    fn new(counters: BudgetCounters, limits: BudgetLimits) -> Self {
+        let mut this = Self {
+            counters,
+            limits,
+            breach: None,
+        };
+        // B7: a resume without raising the ceiling must re-trip
+        // immediately -- not let one more dispatch slip through before
+        // noticing -- or resuming would bound nothing.
+        this.recheck_on_init();
+        this
+    }
+
+    fn recheck_on_init(&mut self) {
+        if let Some(limit) = self.limits.max_model_calls
+            && self.counters.model_calls > limit
+        {
+            self.breach = Some(BudgetBreach {
+                message: format!(
+                    "budget ceiling already breached on resume: max-model-calls at {} \
+                     (limit {}) -- raise --max-model-calls to continue",
+                    self.counters.model_calls, limit
+                ),
+            });
+            return;
+        }
+        if let Some(limit) = self.limits.max_tokens
+            && self.counters.total_tokens > limit
+        {
+            self.breach = Some(BudgetBreach {
+                message: format!(
+                    "budget ceiling already breached on resume: max-tokens at {} (limit {}) \
+                     -- raise --max-tokens to continue",
+                    self.counters.total_tokens, limit
+                ),
+            });
+        }
+    }
+
+    fn snapshot(&self) -> BudgetCounters {
+        self.counters
+    }
+
+    fn breach(&self) -> Option<BudgetBreach> {
+        self.breach.clone()
+    }
+
+    /// Gate a NEW dispatch (a top-level node about to be spawned, or a
+    /// critic sub-dispatch about to be issued) against `max_model_calls`.
+    /// Synchronous and mutating: on success it immediately accounts for
+    /// the dispatch's first model call, so a burst of concurrently-ready
+    /// nodes cannot all pass the check before any of them reports back
+    /// (B2a). `Err` (first-breach-wins) means the caller must not
+    /// dispatch.
+    fn reserve(&mut self, node_id: &str) -> Result<(), BudgetBreach> {
+        if let Some(b) = &self.breach {
+            return Err(b.clone());
+        }
+        if let Some(limit) = self.limits.max_model_calls
+            && self.counters.model_calls >= limit
+        {
+            let breach = BudgetBreach {
+                message: format!(
+                    "budget ceiling breached: max-model-calls reached {} (limit {}); \
+                     refusing to dispatch '{}'",
+                    self.counters.model_calls, limit, node_id
+                ),
+            };
+            self.breach = Some(breach.clone());
+            return Err(breach);
+        }
+        self.counters.model_calls += 1;
+        Ok(())
+    }
+
+    /// Record token usage for a dispatch's FIRST call, whose model-calls
+    /// slot was already accounted for by a prior `reserve()`. Returns the
+    /// breach, if this call is the one that tripped it (`None` if already
+    /// breached, or if this call tripped nothing).
+    fn record_first_usage(
+        &mut self,
+        node_id: &str,
+        usage: Option<TokenUsage>,
+    ) -> Option<BudgetBreach> {
+        self.record_usage(node_id, usage, false)
+    }
+
+    /// Record a real model call NOT covered by a prior `reserve()` -- a
+    /// retry or fallback-model attempt beyond a dispatch's first call.
+    /// Unguarded (B5: a node already in flight finishes its own retry loop
+    /// uninterrupted, it is not cut off mid-node) but still added to the
+    /// reported totals and still checked for a breach, so a single chatty
+    /// node cannot silently blow through `max_model_calls` via its own
+    /// retries either.
+    fn record_extra_call(
+        &mut self,
+        node_id: &str,
+        usage: Option<TokenUsage>,
+    ) -> Option<BudgetBreach> {
+        self.counters.model_calls += 1;
+        self.record_usage(node_id, usage, true)
+    }
+
+    fn record_usage(
+        &mut self,
+        node_id: &str,
+        usage: Option<TokenUsage>,
+        recheck_model_calls: bool,
+    ) -> Option<BudgetBreach> {
+        let already_breached = self.breach.is_some();
+        match usage {
+            Some(u) => {
+                self.counters.total_tokens += u.total_tokens;
+                if !already_breached
+                    && let Some(limit) = self.limits.max_tokens
+                    && self.counters.total_tokens > limit
+                {
+                    let breach = BudgetBreach {
+                        message: format!(
+                            "budget ceiling breached: max-tokens reached {} (limit {}) after \
+                             node '{}'",
+                            self.counters.total_tokens, limit, node_id
+                        ),
+                    };
+                    self.breach = Some(breach.clone());
+                    return Some(breach);
+                }
+            }
+            None => {
+                // B4b, G6: a missing usage from a backend already verified
+                // at startup to claim `token_usage` is a hard error, never
+                // treated as zero -- a zero would let an unreporting path
+                // spend without limit.
+                if !already_breached && self.limits.max_tokens.is_some() {
+                    let breach = BudgetBreach {
+                        message: format!(
+                            "budget error: node '{}' reported no token usage, but \
+                             --max-tokens requires it; the configured backend was verified \
+                             at startup to support token_usage, so a missing usage is a hard \
+                             error, not zero spend (spec-39 B4b)",
+                            node_id
+                        ),
+                    };
+                    self.breach = Some(breach.clone());
+                    return Some(breach);
+                }
+            }
+        }
+        if !already_breached
+            && recheck_model_calls
+            && let Some(limit) = self.limits.max_model_calls
+            && self.counters.model_calls > limit
+        {
+            let breach = BudgetBreach {
+                message: format!(
+                    "budget ceiling breached: max-model-calls reached {} (limit {}) after \
+                     node '{}'",
+                    self.counters.model_calls, limit, node_id
+                ),
+            };
+            self.breach = Some(breach.clone());
+            return Some(breach);
+        }
+        None
+    }
+}
 
 /// Typed dispatch event replacing the colon-delimited string protocol.
 /// Encodes retry attempts, backoff retries, and model fallbacks with type safety.
@@ -45,9 +233,25 @@ pub enum DispatchEvent {
     /// the event log means a verification step actually spent a model call,
     /// not just that one was configured.
     CriticDispatched { model: String },
+    /// spec-39 B9: cumulative counters after a model-consuming call made
+    /// during this dispatch (the node's own call, a retry/fallback, or a
+    /// critic sub-dispatch). Translated to `Event::BudgetUpdated` by the
+    /// main loop.
+    BudgetUpdated { model_calls: u64, total_tokens: u64 },
+    /// spec-39 B5/B8: a budget ceiling tripped during this dispatch --
+    /// either the node's own call/retry, or its critic sub-dispatch.
+    /// Translated to `Event::BudgetBreached` by the main loop, which
+    /// de-duplicates so only the first breach of a run is announced.
+    BudgetBreached { message: String },
 }
 
 impl Scheduler {
+    // spec-39 threaded `limits: BudgetLimits` onto an already-8-parameter
+    // internal entry point; bundling every parameter into a context struct
+    // is a larger refactor than this spec's scope (N2: no Worker/Store
+    // trait change, surgical diff). Matches the existing precedent at
+    // `sdd::mod` for the same tradeoff.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn execute(
         dag: Dag,
         worker: Arc<dyn Worker>,
@@ -56,6 +260,7 @@ impl Scheduler {
         inner: Arc<Inner>,
         allow_paid: bool,
         checkpoint: Option<&crate::scheduler::Checkpoint>,
+        limits: BudgetLimits,
     ) -> Result<RunReport, PidagError> {
         // spec-38 F5/G4: expand for_each/quorum at load, before validation,
         // so the scheduler below executes a fixed topology it did not
@@ -65,6 +270,19 @@ impl Scheduler {
 
         // Validate DAG
         dag.validate()?;
+
+        // spec-39 B7: seed cumulative counters from the checkpoint (a
+        // resumed run continues from where it stopped) or zero (a fresh
+        // run). Persisted in the vault via `Event::BudgetUpdated` below,
+        // not just held in memory -- a ceiling already breached must not
+        // reset to zero just by resuming.
+        let initial_counters = checkpoint.map(|c| c.budget).unwrap_or_default();
+        let budget: BudgetHandle = Arc::new(Mutex::new(BudgetInner::new(initial_counters, limits)));
+        // De-duplicates `Event::BudgetBreached` -- the ceiling can be
+        // independently detected from several concurrent sources (the
+        // outer loop's own reservation, a critic sub-dispatch, a node's own
+        // retry loop), but a breach is announced once per run.
+        let mut breach_announced = false;
 
         // T3: Create an unbounded mpsc channel for events. The scheduler sends and moves on;
         // a single consumer task owns the sink.
@@ -375,6 +593,46 @@ impl Scheduler {
                     continue;
                 }
                 if let Some(node) = dag.get_node(&node_id) {
+                    // spec-39 B2/B5/B5a/B8b: gate a NEW dispatch against the
+                    // budget ceilings before committing to it. Checked here,
+                    // in the single-threaded scheduler loop, BEFORE the node
+                    // is spawned as a concurrent task -- so a burst of
+                    // simultaneously-ready nodes (e.g. `for_each` children,
+                    // B8b) cannot all slip past a ceiling in the same pass;
+                    // each is gated individually, synchronously, in
+                    // dispatch order. Shell and quorum nodes consume no
+                    // model and are never gated on `max-model-calls` (B2b,
+                    // G8), but ANY node is refused once the run has already
+                    // breached -- B5's "no further nodes dispatched" is not
+                    // qualified to model-consuming nodes only. `node_id` is
+                    // put back at the front of `ready` (never popped from
+                    // the vault's perspective -- it was never marked
+                    // Running/Done/Failed) so a resume with a raised
+                    // ceiling dispatches it fresh (B6).
+                    let consumes_model =
+                        node.node_type.as_deref() != Some("quorum") && !node.models.is_empty();
+                    let gate_result = {
+                        let mut b = budget.lock().unwrap_or_else(|e| e.into_inner());
+                        if let Some(breach) = b.breach() {
+                            Err(breach)
+                        } else if consumes_model {
+                            b.reserve(&node_id)
+                        } else {
+                            Ok(())
+                        }
+                    };
+                    if let Err(breach) = gate_result {
+                        if !breach_announced {
+                            tx.send(Event::BudgetBreached {
+                                message: breach.message.clone(),
+                            })
+                            .ok();
+                            breach_announced = true;
+                        }
+                        ready.push_front(node_id);
+                        break;
+                    }
+
                     let mut node = node.clone();
                     // I1, I2, I6, I8: Interpolate output references at dispatch time
                     node.prompt = Self::interpolate_outputs(&node.prompt, &node_state);
@@ -405,12 +663,14 @@ impl Scheduler {
                     } else {
                         let worker = Arc::clone(&worker);
                         let semaphore = Arc::clone(&semaphore);
+                        let budget = Arc::clone(&budget);
 
                         let task_model = node.models.first().map(|m| m.name.clone());
                         task_set.spawn(async move {
                             let _permit = semaphore.acquire().await.ok();
                             let (state, model_used, events, final_attempt, verify_failed) =
-                                Self::dispatch_node(&node, worker.as_ref(), allow_paid).await;
+                                Self::dispatch_node(&node, worker.as_ref(), allow_paid, &budget)
+                                    .await;
                             (
                                 node_id,
                                 task_model,
@@ -495,6 +755,29 @@ impl Scheduler {
                                 attempt: 1,
                             })
                             .ok();
+                        }
+                        DispatchEvent::BudgetUpdated {
+                            model_calls,
+                            total_tokens,
+                        } => {
+                            // spec-39 B9: visible whether or not a ceiling
+                            // was set, so an operator can discover what a
+                            // run costs before choosing one.
+                            tx.send(Event::BudgetUpdated {
+                                model_calls,
+                                total_tokens,
+                            })
+                            .ok();
+                        }
+                        DispatchEvent::BudgetBreached { message } => {
+                            // spec-39 B5/B8a: this dispatch's own retry loop
+                            // or its critic sub-dispatch tripped a ceiling.
+                            // De-duplicated with the outer ready-loop's own
+                            // detection so a breach is announced once.
+                            if !breach_announced {
+                                tx.send(Event::BudgetBreached { message }).ok();
+                                breach_announced = true;
+                            }
                         }
                     }
                 }
@@ -797,10 +1080,22 @@ impl Scheduler {
         let mut node_states: Vec<_> = node_state.values().cloned().collect();
         node_states.sort_by(|a, b| a.node_id.cmp(&b.node_id));
 
+        // spec-39 B9: the report states the cumulative counters whether or
+        // not a ceiling was set, and B5: `breach` is the caller's signal to
+        // choose a distinct exit status/message rather than folding this
+        // into `failed`.
+        let (final_counters, breach) = {
+            let b = budget.lock().unwrap_or_else(|e| e.into_inner());
+            (b.snapshot(), b.breach())
+        };
+
         let report = RunReport {
             node_states,
             failed: failed_nodes,
             store_write_failures: write_failures.load(Ordering::SeqCst),
+            model_calls: final_counters.model_calls,
+            total_tokens: final_counters.total_tokens,
+            breach,
         };
 
         inner.tx.send_modify(|snap| {
@@ -811,10 +1106,11 @@ impl Scheduler {
         Ok(report)
     }
 
-    pub(super) async fn dispatch_node(
+    async fn dispatch_node(
         node: &Node,
         worker: &dyn Worker,
         allow_paid: bool,
+        budget: &BudgetHandle,
     ) -> (NodeState, Option<String>, Vec<DispatchEvent>, usize, bool) {
         // Returns: (state, model_used, events, final_attempt, verify_failed_flag)
         let mut final_state = NodeState {
@@ -894,6 +1190,7 @@ impl Scheduler {
                             verify_pre_token.as_deref(),
                             worker,
                             allow_paid,
+                            budget,
                         )
                         .await;
                         final_state = updated_state;
@@ -920,6 +1217,14 @@ impl Scheduler {
         let mut prev_model: Option<String> = None;
         let mut first_model = true;
         let mut last_failure_output: Option<String> = None;
+        // spec-39 B2/B3: the caller already reserved a budget slot for this
+        // dispatch's FIRST real model call (the outer ready-loop or
+        // `eval_critic`, before invoking `dispatch_node` at all). That
+        // reservation accounted for one `model_calls` unit but not yet its
+        // tokens; every call after the first is NOT pre-reserved (B5: a
+        // node in flight finishes its own retry/fallback loop
+        // uninterrupted) and is accounted for post-hoc instead.
+        let mut is_first_call = true;
 
         for model in &node.models {
             if model.paid && !allow_paid {
@@ -964,6 +1269,43 @@ impl Scheduler {
                         return (final_state, None, events, last_attempt, verify_failed);
                     }
                 };
+
+                // spec-39 B1/B2/B3/B4b: every real model call -- success or
+                // failure -- consumed a model in reality, so it counts
+                // (B2). Usage (if the backend reported it) is added to the
+                // running token total (B3); a missing usage while
+                // `--max-tokens` is active is a hard error, never treated
+                // as zero (B4b, G6). This is the accumulator the acceptance
+                // test (B8a) checks is NOT limited to the top-level ready
+                // loop: it fires for every attempt of every dispatch,
+                // including a `Verify::Critic` sub-dispatch, because
+                // `eval_critic` reuses this exact function.
+                let usage = output.usage.clone();
+                let new_breach = if is_first_call {
+                    is_first_call = false;
+                    budget
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .record_first_usage(&node.id, usage)
+                } else {
+                    budget
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .record_extra_call(&node.id, usage)
+                };
+                {
+                    let snapshot = budget.lock().unwrap_or_else(|e| e.into_inner()).snapshot();
+                    events.push(DispatchEvent::BudgetUpdated {
+                        model_calls: snapshot.model_calls,
+                        total_tokens: snapshot.total_tokens,
+                    });
+                }
+                if let Some(breach) = new_breach {
+                    events.push(DispatchEvent::BudgetBreached {
+                        message: breach.message,
+                    });
+                }
+
                 if output.success {
                     if let Some(validate_str) = &node.validate
                         && !output.output.contains(validate_str)
@@ -986,6 +1328,7 @@ impl Scheduler {
                         verify_pre_token.as_deref(),
                         worker,
                         allow_paid,
+                        budget,
                     )
                     .await;
                     final_state = updated_state;
@@ -1201,6 +1544,7 @@ impl Scheduler {
         verify_pre_token: Option<&str>,
         worker: &dyn Worker,
         allow_paid: bool,
+        budget: &BudgetHandle,
     ) -> (NodeState, bool, Vec<DispatchEvent>) {
         let mut events = Vec::new();
         if let Some(ref verify) = node.verify {
@@ -1211,6 +1555,7 @@ impl Scheduler {
                 verify_pre_token,
                 worker,
                 allow_paid,
+                budget,
                 &mut events,
             )
             .await;
@@ -1248,6 +1593,7 @@ impl Scheduler {
     /// (the compiler cannot compute an infinite-size future); this is the
     /// standard shape for recursive async in Rust and adds no dependency
     /// (N3).
+    #[allow(clippy::too_many_arguments)]
     fn eval_verify<'a>(
         verify: &'a Verify,
         node: &'a Node,
@@ -1255,6 +1601,7 @@ impl Scheduler {
         verify_pre_token: Option<&'a str>,
         worker: &'a dyn Worker,
         allow_paid: bool,
+        budget: &'a BudgetHandle,
         events: &'a mut Vec<DispatchEvent>,
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
         Box::pin(async move {
@@ -1274,6 +1621,7 @@ impl Scheduler {
                         worker_output,
                         worker,
                         allow_paid,
+                        budget,
                         events,
                     )
                     .await
@@ -1292,6 +1640,7 @@ impl Scheduler {
                             verify_pre_token,
                             worker,
                             allow_paid,
+                            budget,
                             events,
                         )
                         .await
@@ -1317,6 +1666,7 @@ impl Scheduler {
     /// exhausted fallbacks, a timeout, or the paid-model gate blocking every
     /// configured model -- is `Err(reason)` with a cause-naming reason
     /// (error handling expectations).
+    #[allow(clippy::too_many_arguments)]
     async fn eval_critic(
         node: &Node,
         prompt_template: &str,
@@ -1324,6 +1674,7 @@ impl Scheduler {
         worker_output: &str,
         worker: &dyn Worker,
         allow_paid: bool,
+        budget: &BudgetHandle,
         events: &mut Vec<DispatchEvent>,
     ) -> Result<(), String> {
         // C7: a critic whose models are all paid is subject to the same
@@ -1337,6 +1688,26 @@ impl Scheduler {
                 "critic blocked: allow_paid is disabled and every configured critic model is paid"
                     .to_string(),
             );
+        }
+
+        // spec-39 B8/B8a: a critic dispatch is a model call and counts
+        // toward both ceilings, gated the SAME way a top-level node is
+        // gated in the outer ready-loop. This is the acceptance test for
+        // the spec: an accumulator wired only into the outer loop's own
+        // dispatch decision never sees this call at all, because a critic
+        // sub-dispatch never passes through the ready queue.
+        {
+            let mut b = budget.lock().unwrap_or_else(|e| e.into_inner());
+            if let Err(breach) = b.reserve(&format!("{}::verify", node.id)) {
+                drop(b);
+                events.push(DispatchEvent::BudgetBreached {
+                    message: breach.message.clone(),
+                });
+                return Err(format!(
+                    "critic blocked: budget ceiling exceeded ({})",
+                    breach.message
+                ));
+            }
         }
 
         // C3b: the producing node's own output is available to the critic
@@ -1390,7 +1761,7 @@ impl Scheduler {
         }
 
         let (state, _model_used, sub_events, _attempt, _verify_failed) =
-            Self::dispatch_node(&critic_node, worker, allow_paid).await;
+            Self::dispatch_node(&critic_node, worker, allow_paid, budget).await;
         events.extend(sub_events);
 
         match state.state {

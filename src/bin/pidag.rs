@@ -56,7 +56,7 @@ fn print_help() {
         r#"pidag -- deterministic, resilient multi-node LLM DAG executor
 
 USAGE:
-    pidag run <dag.json> [--concurrency N] [--allow-paid] [--vault PATH] [--run-id ID] [--resume] [--fresh] [--retry-failed]
+    pidag run <dag.json> [--concurrency N] [--allow-paid] [--vault PATH] [--run-id ID] [--resume] [--fresh] [--retry-failed] [--max-model-calls N] [--max-tokens N]
     pidag show <run_id> [--vault PATH]
     pidag list [--vault PATH]
     pidag attach [--project-root PATH]
@@ -97,6 +97,22 @@ OPTIONS:
     --resume                Resume an interrupted run from checkpoint (sdd + run)
     --fresh                 Force clean start, ignoring any existing checkpoint
     --retry-failed          Retry nodes that failed in a previous run (use with --resume)
+    --max-model-calls N     Abort the run once model-consuming dispatches would exceed N
+                            (shell/quorum nodes don't count). Counters persist in the vault
+                            and accumulate across --resume, so a raised ceiling picks up
+                            from where the prior run stopped, not from zero. Nodes already
+                            in flight when the ceiling trips are not cancelled (pidag cannot
+                            cancel mid-call), so a run may OVERSHOOT the ceiling by at most
+                            the in-flight set -- i.e. up to --concurrency extra dispatches.
+                            On breach the run exits with status 3 (distinct from an ordinary
+                            node failure's status 1); resume with --resume --run-id after
+                            raising the ceiling.
+    --max-tokens N          Abort the run once cumulative reported tokens would exceed N.
+                            STARTUP ERROR if the configured backend does not report token
+                            usage (the default `pi -p` print-mode path never does) -- pidag
+                            refuses to start rather than silently not enforcing the ceiling.
+                            Use --max-model-calls on backends that can't report tokens.
+                            Same overshoot and persistence behaviour as --max-model-calls.
     --project-root PATH     Project root for attach (default: current directory)
     --run                   Execute DAG immediately (for sdd)
     --resume                Resume an interrupted run from checkpoint (sdd only)

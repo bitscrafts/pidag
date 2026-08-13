@@ -129,16 +129,19 @@ impl Worker for ScriptedWorker {
                 success: true,
                 output: s,
                 retryable: false,
+                usage: None,
             }),
             Some(Outcome::Failure(s)) => Ok(WorkerOutput {
                 success: false,
                 output: s,
                 retryable: false,
+                usage: None,
             }),
             None => Ok(WorkerOutput {
                 success: true,
                 output: format!("default output for {node_id}"),
                 retryable: false,
+                usage: None,
             }),
         }
     }

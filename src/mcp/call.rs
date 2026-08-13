@@ -67,6 +67,7 @@ impl Worker for McpCallWorker {
             success: true,
             output,
             retryable: false,
+            usage: None,
         })
     }
 }

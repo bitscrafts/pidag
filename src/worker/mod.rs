@@ -51,6 +51,15 @@ pub struct WorkerOutput {
     /// `false`; only `PiPrintWorker` and `A2aWorker` may set it `true`. See
     /// [`classify_retryable`].
     pub retryable: bool,
+    /// Token usage reported by the backend for this call, if any (spec-39,
+    /// B1). `Some` only when the worker actually has a usage source:
+    /// `AgentWorker` populates it from the backend's `AgentReply.usage`
+    /// when the backend declares the `token_usage` capability.
+    /// `RealShellWorker`, `PiPrintWorker`, `A2aWorker` and `McpCallWorker`
+    /// have no usage source and always set `None` — inventing a number
+    /// here would be a lie the scheduler's `--max-tokens` ceiling would
+    /// then silently under-count against (B4b).
+    pub usage: Option<crate::backend::TokenUsage>,
 }
 
 #[async_trait]
@@ -144,6 +153,7 @@ impl Worker for DelayMockWorker {
             success: true,
             output: format!("output from {node_id}"),
             retryable: false,
+            usage: None,
         })
     }
 }
@@ -206,4 +216,45 @@ pub fn build_worker(
     };
 
     Ok(Box::new(worker))
+}
+
+/// Resolve the name and declared capabilities of the backend a run would
+/// use, without building the full `TypeDispatchWorker` (spec-39, B4a).
+///
+/// `None` means no backend is configured at all -- LLM nodes route to the
+/// default `PiPrintWorker`/`A2aWorker` (spec-21 N1), which have no usage
+/// source whatsoever (`WorkerOutput.usage` is always `None`, B1b). The
+/// caller (the `--max-tokens` startup check) must treat that the same as
+/// an explicit `token_usage: false` capability.
+///
+/// Backend construction is cheap and side-effect-free for every registered
+/// backend (`PiBackend::new` spawns no process; see its doc comment), so
+/// this can build a throwaway instance purely to read `.capabilities()`
+/// without duplicating the registry match arms' meaning -- it mirrors
+/// `build_worker`'s resolution exactly so the two never disagree about
+/// which backend a run would actually use.
+pub fn resolve_backend_capabilities(
+    config: &Config,
+) -> Result<Option<(String, crate::backend::AgentCapabilities)>, PidagError> {
+    let backend_name =
+        crate::backend::registry::resolve_backend_name(config.agent.backend.as_deref());
+    let Some(name) = backend_name else {
+        return Ok(None);
+    };
+    let backend: Arc<dyn crate::backend::AgentBackend> = match name.as_str() {
+        "mock" => Arc::new(crate::backend::MockBackend::new()),
+        "pi" => Arc::new(PiBackend::new(
+            config.project.root.clone(),
+            Duration::from_secs(60),
+            1,
+            config.worker.provider.clone(),
+        )),
+        _ => {
+            return Err(PidagError::Validation(format!(
+                "unknown backend '{}'; registered backends: mock, pi",
+                name
+            )));
+        }
+    };
+    Ok(Some((backend.name().to_string(), backend.capabilities())))
 }

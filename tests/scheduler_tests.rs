@@ -65,16 +65,19 @@ impl Worker for MockWorkerScript {
                     success: true,
                     output: output.clone(),
                     retryable: false,
+                    usage: None,
                 }),
                 MockOutcome::Failure => Ok(WorkerOutput {
                     success: false,
                     output: "worker failed".to_string(),
                     retryable: false,
+                    usage: None,
                 }),
                 MockOutcome::FailureWithMessage(msg) => Ok(WorkerOutput {
                     success: false,
                     output: msg.clone(),
                     retryable: false,
+                    usage: None,
                 }),
             }
         } else {
@@ -83,6 +86,7 @@ impl Worker for MockWorkerScript {
                 success: false,
                 output: "no script entry".to_string(),
                 retryable: false,
+                usage: None,
             })
         };
 
@@ -823,6 +827,7 @@ impl Worker for DelayWorker {
             success: true,
             output: self.output.clone(),
             retryable: false,
+            usage: None,
         })
     }
 }

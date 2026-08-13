@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,6 +60,28 @@ pub enum Event {
         node_id: String,
         worker_claim: String,
         verify_output: String,
+    },
+    /// spec-39 B9: cumulative budget counters after a model-consuming
+    /// dispatch. A snapshot (current totals), not a delta -- the vault
+    /// projection just overwrites the run's stored counters with the
+    /// latest value, so replay or duplicate emission is harmless. Visible
+    /// whether or not a ceiling was set (B9), so an operator can discover
+    /// what a run costs before choosing a ceiling for it.
+    ///
+    /// Added at the end of the enum deliberately: `Event` is bincode-coded
+    /// in the vault (`RedbStore`), which encodes a variant as a u32 index,
+    /// not a name -- appending here leaves every existing variant's index
+    /// unchanged, so a vault written before this spec still decodes.
+    BudgetUpdated {
+        model_calls: u64,
+        total_tokens: u64,
+    },
+    /// spec-39 B5: a budget ceiling stopped the run from dispatching
+    /// further nodes. Distinct from `NodeFailed` so a breach is never
+    /// mistaken for an ordinary node failure in the event log
+    /// (error-handling expectations: raise-and-resume vs fix-and-resume).
+    BudgetBreached {
+        message: String,
     },
 }
 
@@ -199,6 +221,14 @@ pub struct RedbSink {
     store: Arc<dyn Store>,
     run_id: String,
     write_failures: Arc<AtomicUsize>,
+    /// spec-39 B6: set once an `Event::BudgetBreached` has been observed
+    /// this run, so the `Event::DagDone` handler below can leave
+    /// `RunMeta.completed_at` as `None` instead of marking the run
+    /// complete. A breach is a checkpoint, not a completion -- `--resume`
+    /// (spec-08's `load_checkpoint`) treats `Some(completed_at)` as
+    /// `AlreadyDone` and would never dispatch the remaining nodes even
+    /// after the operator raised the ceiling.
+    breached: Arc<AtomicBool>,
 }
 
 impl RedbSink {
@@ -207,6 +237,7 @@ impl RedbSink {
             store,
             run_id,
             write_failures: Arc::new(AtomicUsize::new(0)),
+            breached: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -219,6 +250,7 @@ impl RedbSink {
             store,
             run_id,
             write_failures,
+            breached: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -244,6 +276,7 @@ impl EventSink for RedbSink {
                 | Event::NodeFailed { .. }
                 | Event::NodeRetry { .. }
                 | Event::NodeBlocked { .. }
+                | Event::BudgetUpdated { .. }
         );
         if !has_projection && let Err(e) = self.store.append_event(&self.run_id, event).await {
             eprintln!("Failed to append event: {}", e);
@@ -366,15 +399,46 @@ impl EventSink for RedbSink {
                 successful_nodes,
                 failed_nodes,
             } => {
-                // Update run to mark completion
+                // Update run to mark completion. spec-39 B6: NOT if this run
+                // breached a budget ceiling -- see `breached` field doc.
                 if let Ok(Some(mut run)) = self.store.get_run(&self.run_id).await {
-                    run.completed_at = Some(chrono::Utc::now().to_rfc3339());
+                    if !self.breached.load(Ordering::SeqCst) {
+                        run.completed_at = Some(chrono::Utc::now().to_rfc3339());
+                    }
                     run.successful_nodes = *successful_nodes;
                     run.failed_nodes = *failed_nodes;
                     if let Err(e) = self.store.put_run(&run).await {
                         eprintln!("Failed to put run on DagDone: {}", e);
                         self.write_failures.fetch_add(1, Ordering::SeqCst);
                     }
+                }
+            }
+            Event::BudgetBreached { .. } => {
+                // spec-39 B5/B6: recorded verbatim in the events table by
+                // the `has_projection` append above (no dedicated
+                // projection table -- `BudgetCounters` already carries the
+                // authoritative totals via `Event::BudgetUpdated`); this
+                // arm's only job is to flip `breached` so `Event::DagDone`
+                // does not mark the run complete.
+                self.breached.store(true, Ordering::SeqCst);
+            }
+            Event::BudgetUpdated {
+                model_calls,
+                total_tokens,
+            } => {
+                // spec-39 B7: persist the latest cumulative counters so a
+                // resumed run continues from here, not from zero.
+                let counters = crate::scheduler::BudgetCounters {
+                    model_calls: *model_calls,
+                    total_tokens: *total_tokens,
+                };
+                if let Err(e) = self
+                    .store
+                    .project_budget_updated(&self.run_id, event, &counters)
+                    .await
+                {
+                    eprintln!("Failed to project BudgetUpdated: {}", e);
+                    self.write_failures.fetch_add(1, Ordering::SeqCst);
                 }
             }
             Event::NodeRetry { node_id, reason: _ } => {
