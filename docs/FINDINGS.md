@@ -5,7 +5,7 @@ pattern generalises well beyond this codebase.
 
 ## The pattern: a check that looks rigorous while testing the wrong surface
 
-Seven times in one session, a green test suite coexisted with a broken feature. Every time,
+Eight times in one session, a green test suite coexisted with a broken feature. Every time,
 the check exercised the *unit* and never the *seam*.
 
 | what was claimed | the suite said | a run said |
@@ -17,6 +17,7 @@ the check exercised the *unit* and never the *seam*.
 | module grouping is coherent | unit tests green | **arbitrary on any non-Rust spec** |
 | every store method is offloaded | guard test green | **the guard false-positived on the one method it protected** |
 | vault wire format is compatible | the compat guard passed | **no pre-change vault could be opened at all** |
+| `split` produces complete child specs | all `split` tests green | **a third of every spec silently dropped** |
 
 The generalisation, and the rule now applied here:
 
@@ -146,6 +147,35 @@ That is the orchestrator failing the same way twice in one spec: the defect was 
 compatibility claim, and the fix for it shipped with a false claim of its own. It also shows
 the guardrail working — a spec that forbids the workhorse from editing requirements gets the
 disagreement surfaced rather than absorbed.
+
+### `split` lost a third of every spec to a nine-line parser
+
+`extract_section` ended a section at `remaining.find("##")` — a *substring* search. A
+`### Functional` sub-heading therefore terminated the section, so a `## Requirements` whose
+body opens with one extracted as **empty**. That is the house style of every spec from 21
+onward. Two further defects sat in the same nine lines: the terminator also matched inside
+fenced code blocks, and the start was unanchored, so a `### Requirements` sub-heading or a
+prose mention of `` `## Architecture` `` could win over the real heading.
+
+Measured across 227 sections in `specs/`: **37 extracted empty despite having content, 39 lost
+more than 10%, 151 were intact.** One third of all spec content, silently dropped. The largest
+single case was 7,942 characters of Requirements.
+
+`split` writes child specs from these extractions. A child missing its Requirements is not a
+degraded brief — it is a brief with the contract removed, handed to an implementer with no way
+to know. Every `split` test passed throughout, because their fixtures are simple specs with no
+`###` sub-headings: **the one input shape where the broken implementation works.** The same
+sentence was already written in this file about the module extractor, one section above.
+
+It surfaced only because spec-40 added Architecture attribution and its implementer reported
+that the feature "never fires visibly" on real specs — noticing that a *new* feature was
+inert, and looking for why, rather than shipping it green.
+
+> **When a component is fed real data in production and fixtures in tests, the fixtures are a
+> statement about what you imagined, not about what arrives.** Point the test at the real
+> corpus.
+
+Fixed by spec-41, whose regression guard iterates `specs/*.md` rather than fixtures.
 
 ## Where the failures actually came from
 
