@@ -4,10 +4,11 @@
 - **Crate**: `pidag`
 - **Priority**: HIGH — `docs/ARCHITECTURE.md` §4 identifies this as the single highest-value
   change available, at 2–3 days.
-- **Status**: IMPLEMENTED and verified 2026-08-12. Gate green. **Caveat**: the critic
-  has only been exercised against a scripted worker and a deterministic `pi` shim —
-  this container has no model credentials, so the wiring is proven end to end but the
-  critic's judgement has never faced a live model. See Exit Criterion 3.
+- **Status**: IMPLEMENTED and verified 2026-08-12. Gate green. **Caveat**: the critic has
+  only been exercised against a scripted worker and a deterministic `pi` shim, so its
+  wiring is proven end to end but its *judgement* has not been. **Correction 2026-08-13**:
+  the implementing agent reported this container had no model credentials. It does — six
+  provider keys are present. Live validation is unblocked and outstanding.
 - **Source**: `docs/ARCHITECTURE.md` §3–4. Closes the 21% verification gap in the MAST
   taxonomy, and composes with the 42% specification gap.
 - **Depends-On**: spec-29 (runtime output interpolation) — landed. spec-36 (vault schema

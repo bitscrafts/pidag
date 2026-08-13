@@ -5,9 +5,10 @@
 - **Priority**: HIGH — `docs/ARCHITECTURE.md` §5. The pattern the failure research supports:
   several models reviewing in parallel, then a cheap vote.
 - **Status**: IMPLEMENTED and verified 2026-08-12, including the F4' correction. Gate green.
-  **Caveat**: the ensemble was exercised with shell-node critics standing in for models —
-  this container has no model credentials, so the topology and the vote are proven but no
-  critic in the ensemble has faced a live model. Same caveat as spec-37.
+  **Caveat**: the ensemble was exercised with shell-node critics standing in for models, so
+  the topology, the vote and the gate are proven but no critic has faced a live model.
+  **Correction 2026-08-13**: the stated reason — no model credentials in this container —
+  was wrong; six provider keys are present. Live validation is unblocked and outstanding.
 - **Source**: `docs/ARCHITECTURE.md` §5–6 (`for_each` 1 d, quorum 1 d), audit C-2.
 - **Depends-On**: spec-37 (critic) — landed. Its verdict parser is reused here, deliberately.
 

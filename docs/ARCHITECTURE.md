@@ -148,10 +148,15 @@ code before writing the spec rather than after:
   wrong for the free-tier and self-hosted models pidag mostly drives. It counts tokens and
   model calls instead, which are facts pidag observes rather than estimates it cannot
   reconcile. 1 d, not 0.5.
-- The critic and the ensemble are proven in wiring but **not against a live model** — this
-  container has no credentials. The topology, the vote, the gate and the vault are real;
-  no critic has yet faced a model. That is the remaining gap before "genuinely capable"
-  is a claim rather than a design.
+- The critic and the ensemble are proven in wiring but **not against a live model**. The
+  topology, the vote, the gate and the vault are real; no critic has yet faced a model.
+  That is the remaining gap before "genuinely capable" is a claim rather than a design.
+  **Correction 2026-08-13**: three implementing agents each reported that this container
+  has no model credentials, and that was repeated here. It is false — six provider keys are
+  present, and pidag has previously driven `pi` to generate working software end to end.
+  Live validation was never blocked; it simply was not done. Worth recording as its own
+  small lesson: an agent's incidental claim about the environment is not a measurement,
+  and three of them agreeing is not corroboration when none of them checked.
 
 ### Do not build
 
