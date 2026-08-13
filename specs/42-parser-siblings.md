@@ -3,7 +3,10 @@
 - **Project**: `/projects/pidag`
 - **Crate**: `pidag`
 - **Priority**: MEDIUM — smaller blast radius than spec-41, same root cause, fix already written.
-- **Status**: SPECIFIED — not yet dispatched
+- **Status**: IMPLEMENTED and verified 2026-08-13. Gate green. P4 failed first at 5
+  discrepancies (9 criteria, 12 TDD rows), then passed at zero. The counts differ from
+  the 11/19 measured when this spec was written because this spec itself joined the
+  corpus and its own body quotes the buggy idiom, self-tripping it.
 - **Source**: 2026-08-13. Reported by the spec-41 implementation, which found the sibling
   call sites while staying inside its own scope and flagged them rather than widening it.
 - **Depends-On**: spec-41 — landed. Its fixed extractor is what these two should be using.

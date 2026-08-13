@@ -816,3 +816,395 @@ Guardrail body.
          sections must remain reachable: {guardrails:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// spec-42: the other two copies of the section-parsing bug.
+//
+// `parse_exit_criteria` and `parse_tdd_tests` each carried their own
+// hand-rolled `remaining.find("##")` terminator search -- the same substring
+// idiom spec-41 replaced in `extract_section` with a fence-aware, heading-
+// anchored line scan. A `###` sub-heading or a `## ...` line inside a fenced
+// block ends the section early, silently dropping the criteria/rows after it.
+// Measured across specs/*.md: 3 specs affected, 11 exit-criteria items and 19
+// TDD rows dropped. `split` allocates criteria across children, so a
+// criterion it cannot see is allocated to nobody and appears in no child.
+//
+// The fix is to delete both hand-rolled copies and have both functions call
+// spec-41's `extract_section` -- one extractor, three callers.
+// ---------------------------------------------------------------------------
+
+use pidag::split::{ExitCriterion, parse_tdd_tests};
+
+/// Ground truth for "what section body is actually there", computed
+/// independently of `extract_section` and of `parse_exit_criteria` /
+/// `parse_tdd_tests` -- fence-aware, anchored to a line-exact heading match,
+/// terminated at the next `^#{1,2}\s` heading outside a fence. Mirrors the
+/// independent ground truth spec-41 built for E6, for the same reason: a bug
+/// that breaks extraction must not also break the yardstick that measures it.
+fn ground_truth_section_body<'a>(spec: &'a str, title: &str) -> Vec<&'a str> {
+    let mut in_fence = false;
+    let mut fence_marker = "";
+    let mut body: Option<Vec<&str>> = None;
+
+    for line in spec.lines() {
+        let trimmed = line.trim_start();
+        let is_fence = trimmed.starts_with("```") || trimmed.starts_with("~~~");
+
+        if is_fence {
+            if !in_fence {
+                in_fence = true;
+                fence_marker = &trimmed[..3];
+            } else if trimmed.starts_with(fence_marker) {
+                in_fence = false;
+            }
+            if let Some(b) = body.as_mut() {
+                b.push(line);
+            }
+            continue;
+        }
+
+        if in_fence {
+            if let Some(b) = body.as_mut() {
+                b.push(line);
+            }
+            continue;
+        }
+
+        match &mut body {
+            None => {
+                if line.trim_end() == title {
+                    body = Some(Vec::new());
+                }
+            }
+            Some(b) => {
+                let hashes = line.bytes().take_while(|&c| c == b'#').count();
+                let is_heading = (1..=2).contains(&hashes)
+                    && line
+                        .as_bytes()
+                        .get(hashes)
+                        .is_some_and(u8::is_ascii_whitespace);
+                if is_heading {
+                    break;
+                }
+                b.push(line);
+            }
+        }
+    }
+
+    body.unwrap_or_default()
+}
+
+/// Ground-truth exit-criteria count: unchecked `- [ ]` items in the real
+/// section body, matching exactly the prefix `parse_exit_criteria` itself
+/// matches (checked `- [x]` items are not counted by the production parser
+/// either; that is pre-existing and out of scope here).
+fn ground_truth_exit_criteria_count(spec: &str) -> usize {
+    ground_truth_section_body(spec, "## Exit Criteria")
+        .iter()
+        .filter_map(|line| line.trim().strip_prefix("- [ ]"))
+        .filter(|rest| !rest.trim().is_empty())
+        .count()
+}
+
+/// Ground-truth TDD test names: same de-duplicated `test_*`-in-a-pipe-row
+/// extraction `parse_tdd_tests` performs, applied to the independently
+/// computed section body. Reproduced here rather than calling the (private)
+/// production helper, for the same non-tautology reason as the body scan
+/// above.
+fn ground_truth_test_names(body: &[&str]) -> Vec<String> {
+    let mut tests = Vec::new();
+    for line in body {
+        if line.contains("test_") && line.contains('|') {
+            for part in line.split('|') {
+                let trimmed = part.trim().trim_matches('`');
+                if trimmed.starts_with("test_") {
+                    let end_pos = trimmed
+                        .find(|c: char| !c.is_alphanumeric() && c != '_')
+                        .unwrap_or(trimmed.len());
+                    let test_name = trimmed[..end_pos].to_string();
+                    if !test_name.is_empty() && !tests.contains(&test_name) {
+                        tests.push(test_name);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    tests
+}
+
+/// P4, the acceptance test: for every real spec in this repo, the number of
+/// exit-criteria items and TDD rows `parse_exit_criteria` / `parse_tdd_tests`
+/// return must equal the number actually present in the section, per the
+/// independent ground truth above.
+///
+/// Must fail before the change, reporting discrepancies summing close to 11
+/// exit-criteria items and 19 TDD rows (this spec's measurement). If it does
+/// not, the measurement in this spec is wrong and implementation must stop.
+#[test]
+fn test_repo_criteria_counts_match() {
+    let specs_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("specs");
+    let mut paths: Vec<_> = fs::read_dir(&specs_dir)
+        .expect("specs/ directory readable")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "md"))
+        .collect();
+    paths.sort();
+    assert!(
+        !paths.is_empty(),
+        "no specs/*.md found at {}; P4 has nothing to check",
+        specs_dir.display()
+    );
+
+    let mut discrepancies: Vec<String> = Vec::new();
+    let mut criteria_checked = 0usize;
+    let mut tdd_checked = 0usize;
+    let mut criteria_missing = 0isize;
+    let mut tdd_missing = 0isize;
+
+    for path in &paths {
+        let spec = fs::read_to_string(path).expect("spec readable");
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+
+        let expected_criteria = ground_truth_exit_criteria_count(&spec);
+        criteria_checked += expected_criteria;
+        let got_criteria = parse_exit_criteria(&spec).map(|v| v.len()).unwrap_or(0);
+        if got_criteria != expected_criteria {
+            criteria_missing += expected_criteria as isize - got_criteria as isize;
+            discrepancies.push(format!(
+                "{name}: exit criteria expected {expected_criteria}, parsed {got_criteria}"
+            ));
+        }
+
+        let tdd_body = ground_truth_section_body(&spec, "## TDD Contract");
+        let expected_tests = ground_truth_test_names(&tdd_body);
+        tdd_checked += expected_tests.len();
+        let got_tests = parse_tdd_tests(&spec).unwrap_or_default();
+        if got_tests.len() != expected_tests.len() {
+            tdd_missing += expected_tests.len() as isize - got_tests.len() as isize;
+            discrepancies.push(format!(
+                "{name}: TDD rows expected {}, parsed {}",
+                expected_tests.len(),
+                got_tests.len()
+            ));
+        }
+    }
+
+    assert!(
+        discrepancies.is_empty(),
+        "{} discrepancies (checked {criteria_checked} criteria, {tdd_checked} TDD rows; \
+         missing {criteria_missing} criteria, {tdd_missing} TDD rows overall):\n{}",
+        discrepancies.len(),
+        discrepancies.join("\n")
+    );
+}
+
+/// P2: the whole failure mode here is the terminator idiom being copied a
+/// third time. Guard against it returning by scanning the source itself.
+#[test]
+fn test_no_bare_hash_search_remains() {
+    let src = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/split/mod.rs"))
+        .expect("src/split/mod.rs readable");
+    assert_eq!(
+        src.matches("find(\"##\")").count(),
+        0,
+        "a hand-rolled `find(\"##\")` terminator search remains in src/split/mod.rs"
+    );
+}
+
+/// P1a: an Exit Criteria section containing a `###` sub-heading, with items
+/// both before and after it, must yield every item -- not just the ones
+/// before the sub-heading.
+#[test]
+fn test_exit_criteria_survive_sub_heading() {
+    let spec = r#"# Spec
+
+## Exit Criteria
+
+- [ ] `item one`
+
+### Sub-note
+
+- [ ] `item two`
+- [ ] `item three`
+
+## Guardrails
+"#;
+    let criteria = parse_exit_criteria(spec).expect("criteria parse");
+    let texts: Vec<&str> = criteria.iter().map(|c| c.text.as_str()).collect();
+    assert_eq!(texts, vec!["`item one`", "`item two`", "`item three`"]);
+}
+
+/// P1b: a TDD Contract section with a `###` sub-heading mid-section must
+/// yield every row, before and after the sub-heading.
+#[test]
+fn test_tdd_rows_survive_sub_heading() {
+    let spec = r#"# Spec
+
+## TDD Contract
+
+| id | test | expects |
+|----|------|---------|
+| T1 | `test_one` | passes |
+
+### Notes
+
+| T2 | `test_two` | passes |
+
+## Exit Criteria
+"#;
+    let tests = parse_tdd_tests(spec).expect("tdd parse");
+    assert_eq!(tests, vec!["test_one".to_string(), "test_two".to_string()]);
+}
+
+/// P1c: a `## ...` line inside a fenced block within Exit Criteria must not
+/// terminate the section -- items after the fence are still parsed.
+#[test]
+fn test_exit_criteria_survive_fenced_hash() {
+    let spec = r#"# Spec
+
+## Exit Criteria
+
+- [ ] `item one`
+
+```bash
+## Exit Criteria
+echo "this looks like a heading but is code"
+```
+
+- [ ] `item two`
+
+## Guardrails
+"#;
+    let criteria = parse_exit_criteria(spec).expect("criteria parse");
+    let texts: Vec<&str> = criteria.iter().map(|c| c.text.as_str()).collect();
+    assert_eq!(texts, vec!["`item one`", "`item two`"]);
+}
+
+/// Byte-for-byte reproduction of the pre-spec-42 `parse_exit_criteria`, kept
+/// only so P3 can assert the fixed function agrees with it wherever the old
+/// and new extraction agree (every spec not among the three the bug
+/// affected). Deliberately not `pub`, not in `src/`, and calls nothing from
+/// `pidag::split` -- this function IS the bug, preserved for comparison.
+fn old_parse_exit_criteria(spec: &str) -> Result<Vec<ExitCriterion>, String> {
+    let start = spec
+        .find("## Exit Criteria")
+        .ok_or_else(|| "Exit Criteria section not found".to_string())?;
+    let remaining = &spec[start + 16..];
+    let end = remaining
+        .find("##")
+        .map(|i| i + start + 16)
+        .unwrap_or(spec.len());
+    let criteria_section = &spec[start..end];
+
+    let mut criteria = Vec::new();
+    let mut index = 0;
+    for line in criteria_section.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("- [ ]") {
+            let text = rest.trim().to_string();
+            if !text.is_empty() {
+                criteria.push(ExitCriterion::new(index, text));
+                index += 1;
+            }
+        }
+    }
+    if criteria.is_empty() {
+        return Err("No exit criteria found (expected `- [ ]` items)".to_string());
+    }
+    Ok(criteria)
+}
+
+/// Byte-for-byte reproduction of the pre-spec-42 `parse_tdd_tests`, for the
+/// same reason as `old_parse_exit_criteria` above.
+fn old_parse_tdd_tests(spec: &str) -> Vec<String> {
+    if let Some(start) = spec.find("## TDD Contract") {
+        let remaining = &spec[start + 15..];
+        let end = remaining
+            .find("##")
+            .map(|i| i + start + 15)
+            .unwrap_or(spec.len());
+        let tdd_section = &spec[start..end];
+        let mut tests = Vec::new();
+        for line in tdd_section.lines() {
+            if line.contains("test_") && line.contains('|') {
+                if let Some(test_name) = old_extract_test_name_from_line(line)
+                    && !tests.contains(&test_name)
+                {
+                    tests.push(test_name);
+                }
+            }
+        }
+        tests
+    } else {
+        Vec::new()
+    }
+}
+
+fn old_extract_test_name_from_line(line: &str) -> Option<String> {
+    for part in line.split('|') {
+        let trimmed = part.trim().trim_matches('`');
+        if trimmed.starts_with("test_") {
+            let end_pos = trimmed
+                .find(|c: char| !c.is_alphanumeric() && c != '_')
+                .unwrap_or(trimmed.len());
+            let test_name = trimmed[..end_pos].to_string();
+            if !test_name.is_empty() {
+                return Some(test_name);
+            }
+        }
+    }
+    None
+}
+
+/// P3: for every real spec where the old (buggy) extraction happens to agree
+/// with ground truth -- i.e. every spec the bug does not affect -- the fixed
+/// `parse_exit_criteria` / `parse_tdd_tests` must return exactly what the old
+/// ones returned. Behaviour changes only for the three affected specs.
+#[test]
+fn test_unaffected_specs_parse_identically() {
+    let specs_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("specs");
+    let mut paths: Vec<_> = fs::read_dir(&specs_dir)
+        .expect("specs/ directory readable")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "md"))
+        .collect();
+    paths.sort();
+
+    let mut compared = 0usize;
+    for path in &paths {
+        let spec = fs::read_to_string(path).expect("spec readable");
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+
+        if let Ok(old_c) = old_parse_exit_criteria(&spec) {
+            let ground = ground_truth_exit_criteria_count(&spec);
+            if old_c.len() == ground {
+                compared += 1;
+                let new_c = parse_exit_criteria(&spec).expect("new parse must also succeed here");
+                assert_eq!(
+                    old_c, new_c,
+                    "{name}: exit criteria diverged where old and new should agree"
+                );
+            }
+        }
+
+        let old_tests = old_parse_tdd_tests(&spec);
+        let ground_tdd =
+            ground_truth_test_names(&ground_truth_section_body(&spec, "## TDD Contract"));
+        if old_tests.len() == ground_tdd.len() {
+            compared += 1;
+            let new_tests = parse_tdd_tests(&spec).unwrap_or_default();
+            assert_eq!(
+                old_tests, new_tests,
+                "{name}: TDD tests diverged where old and new should agree"
+            );
+        }
+    }
+
+    assert!(
+        compared > 0,
+        "no unaffected specs found to compare; P3 has nothing to check"
+    );
+}

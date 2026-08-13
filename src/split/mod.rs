@@ -46,18 +46,13 @@ impl ExitCriterion {
 /// Looks for "## Exit Criteria" section and extracts `- [ ]` checkbox items.
 /// Each item becomes an ExitCriterion. Returns error if section not found.
 pub fn parse_exit_criteria(spec: &str) -> Result<Vec<ExitCriterion>, PidagError> {
-    let start = spec
-        .find("## Exit Criteria")
-        .ok_or_else(|| PidagError::Parse("Exit Criteria section not found".to_string()))?;
+    if !spec.contains("## Exit Criteria") {
+        return Err(PidagError::Parse(
+            "Exit Criteria section not found".to_string(),
+        ));
+    }
 
-    // Find next section (starts with ##) or end of spec
-    let remaining = &spec[start + 16..]; // len("## Exit Criteria") = 16
-    let end = remaining
-        .find("##")
-        .map(|i| i + start + 16)
-        .unwrap_or(spec.len());
-
-    let criteria_section = &spec[start..end];
+    let criteria_section = extract_section(spec, "## Exit Criteria");
 
     // Extract checkbox items: `- [ ] <text>`
     let mut criteria = Vec::new();
@@ -89,14 +84,8 @@ pub fn parse_exit_criteria(spec: &str) -> Result<Vec<ExitCriterion>, PidagError>
 /// Looks for "## TDD Contract" section and extracts test function names
 /// (usually in a table). Returns empty vector if section not found.
 pub fn parse_tdd_tests(spec: &str) -> Result<Vec<String>, PidagError> {
-    if let Some(start) = spec.find("## TDD Contract") {
-        let remaining = &spec[start + 15..];
-        let end = remaining
-            .find("##")
-            .map(|i| i + start + 15)
-            .unwrap_or(spec.len());
-
-        let tdd_section = &spec[start..end];
+    if spec.contains("## TDD Contract") {
+        let tdd_section = extract_section(spec, "## TDD Contract");
 
         // Extract test names from table rows: `| test_name |`
         let mut tests = Vec::new();

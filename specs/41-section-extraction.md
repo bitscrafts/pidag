@@ -75,9 +75,9 @@ sub-headings — **the one input shape where the broken implementation works.**
   next line matching `^#{1,2}\s`, i.e. an `#` or `##` heading. **`###` and deeper are content**
   and stay in the body.
 
-- **E3 (code fences are not scanned)**: lines inside a fenced code block — opened and closed by
-  ``` or ~~~ at line start, info string permitted — are never treated as a heading, for either
-  the start or the terminator.
+- **E3 (code fences are not scanned)**: lines inside a fenced code block — opened and closed
+  by a run of three backticks or three tildes at line start, info string permitted — are
+  never treated as a heading, for either the start or the terminator.
 
 - **E4 (a missing section is empty, not an error)**: a spec with no such heading yields an
   empty string, as today. Many small specs have no Architecture section.
