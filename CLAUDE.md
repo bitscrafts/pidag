@@ -25,6 +25,21 @@ and drives `pi` workers through declarative DAGs.
   `specs/<feature>.md` (see `specs/92-configurable-models.md` for the format:
   Overview, Requirements, Architecture, TDD Contract, Exit Criteria,
   Guardrails, Files to Modify).
+- **Exit Criteria must be `- [ ]` checkbox items**, one per line, each
+  containing a runnable command in backticks. This is not cosmetic:
+  `split`'s `parse_exit_criteria` and `validate-exit-criteria.sh` both
+  consume that grammar, so **a spec written any other way cannot be split
+  or validated by pidag itself.** Specs 36–41 were written with a shell
+  block plus numbered prose and are non-conforming for exactly that
+  reason; `specs/42-parser-siblings.md` shows the correct form. They were
+  left as-is because they are already implemented — retrofitting finished
+  contracts buys nothing — but nothing new should follow them.
+- **A spec's own body is parsed by `split`.** Two consequences bit us on
+  2026-08-13. A line starting with up to three spaces then ``` or `~~~`
+  opens a code fence in CommonMark, so wrapping fence syntax across lines
+  in prose silently opens a block; and quoting a bare `##` idiom in text
+  can trip the very parser being described. Keep literal fence markers off
+  the start of a line.
 - **Tests under `_tmp/`** — any test that writes files uses `_tmp/...` as
   its base directory, never `/tmp/`. Gitignored.
 - **Quality gate before commit**:
