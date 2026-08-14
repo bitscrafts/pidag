@@ -2,12 +2,15 @@
 #
 # pi-workhorse.sh — drive `pi` as the implementer while Claude Code orchestrates.
 #
-# Why this exists: invoking `pi` from a non-interactive shell does NOT pick up
-# the user's shell alias, so `~/.pi/agent/system.md` is silently absent and the
-# agent runs with no operating rules at all. Verified 2026-08-14: the bare
-# binary answers NO to "must you update HANDOFF.md", the same call with
-# --append-system-prompt answers YES. Every invocation here composes the
-# guardrails explicitly.
+# Why this exists: pi auto-loads AGENTS.md / CLAUDE.md from its WORKING
+# DIRECTORY, and nothing else. The shell alias that appends
+# ~/.pi/agent/system.md does not expand in a non-interactive shell, so a
+# programmatic call gets none of it. This script guarantees the two things that
+# actually make guardrails apply: it cds to the project root, and it grants
+# tools per role.
+#
+# The model is NOT chosen here -- pi's own settings.json (or PI_MODEL /
+# PI_PROVIDER) decides. Pass one explicitly only to escalate.
 #
 # Roles are separated by TOOL GRANT, not by instruction:
 #   implement  read,write,edit,bash,grep,find,ls   — can change the tree
@@ -18,7 +21,7 @@
 # A reviewer that cannot write is worth more than a reviewer told not to.
 #
 # Usage:
-#   pi-workhorse.sh implement <spec_path> [project_root] [model]
+#   pi-workhorse.sh implement <spec_path> [project_root] [model]   # model optional: escalation only
 #   pi-workhorse.sh repair    <spec_path> [project_root] [model]   # continues the session
 #   pi-workhorse.sh review    <spec_path> [project_root] [model]
 #   pi-workhorse.sh gate      [project_root]
@@ -31,7 +34,12 @@ CMD="${1:-}"
 [ -z "$CMD" ] && { echo "usage: $0 {implement|repair|review|gate|validate} ..." >&2; exit 2; }
 shift
 
-DEFAULT_MODEL="${PI_MODEL:-deepseek-v4-flash}"
+# No model is hardcoded. Omitting --model lets pi use its own configured
+# default (settings.json `model`/`provider`, or the PI_MODEL/PI_PROVIDER env).
+# A model passed as the 3rd argument overrides that, which is the escalation
+# path. Baking a default in here would silently contradict pi's config the
+# moment it changes.
+MODEL=""
 MAX_ITER="${PI_MAX_TOOL_ITERATIONS:-60}"
 
 # ---------------------------------------------------------------- guardrails
@@ -47,8 +55,8 @@ MAX_ITER="${PI_MAX_TOOL_ITERATIONS:-60}"
 # belong to the orchestrator, not to a bounded spec implementation. Appending it
 # would mean shipping a conflict and then overriding it. Cheaper and safer to
 # let CLAUDE.md be the single channel — and much shorter, which matters: a
-# bloated system prompt pushed a trivial query past a 2-minute timeout on
-# deepseek-v4-flash.
+# bloated system prompt pushed a trivial query past a 2-minute timeout on the
+# configured flash model.
 #
 # Consequence: worker-facing rules MUST live in CLAUDE.md to take effect.
 role_preamble() {
@@ -98,7 +106,7 @@ run_validate() {
 case "$CMD" in
   implement|repair|review)
     SPEC="${1:?spec_path required}"; ROOT="${2:-$(dirname "$(dirname "$SPEC")")}"
-    MODEL="${3:-$DEFAULT_MODEL}"
+    MODEL="${3:-}"
     [ -f "$SPEC" ] || { echo "no such spec: $SPEC" >&2; exit 2; }
     SD="$(session_dir_for "$ROOT" "$SPEC")"
 
@@ -138,9 +146,12 @@ serious first. Say FAIL if any requirement is unimplemented or any test was weak
     # project rules silently do not reach the model.
     cd "$ROOT" || { echo "cannot cd to $ROOT" >&2; exit 2; }
 
+    # Only pass --model when one was explicitly requested (escalation).
+    MODEL_ARG=(); [ -n "$MODEL" ] && MODEL_ARG=(--model "$MODEL")
+
     exec "$PI" -p $CONT \
         --session-dir "$SD" \
-        --model "$MODEL" \
+        "${MODEL_ARG[@]}" \
         --tools "$TOOLS" \
         --max-tool-iterations "$MAX_ITER" \
         --append-system-prompt "$(role_preamble)" \

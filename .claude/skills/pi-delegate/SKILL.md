@@ -1,7 +1,7 @@
 ---
 name: pi-delegate
 description: >
-  Delegate implementation to `pi` (deepseek) instead of a Claude subagent, keeping
+  Delegate implementation to `pi` instead of a Claude subagent, keeping
   Claude as planner and reviewer. Use when implementing a spec, fixing a failing
   gate, or any multi-file code change where the reasoning is bounded by a written
   contract. Saves ~80-90% of implementation tokens.
@@ -10,9 +10,10 @@ description: >
 # pi-delegate
 
 Claude plans and verifies. `pi` implements. The split exists because
-implementation reasoning is the expensive part and the cheapest competent model
-that passes the gate is the right one to do it — one session spent 1.9M tokens
-on Claude subagents for work `pi` could have done.
+implementation reasoning is the expensive part, and the cheapest competent model
+that passes the gate is the right one to do it — one session spent 1.9M tokens on
+Claude subagents for work `pi` could have done. Which model that is belongs to
+pi's own configuration, not to this skill.
 
 ## The two layers
 
@@ -43,7 +44,7 @@ Three consequences, and they are the whole design:
    commit before editing, which this project forbids outright; its HANDOFF.md and
    memory commandments belong to the orchestrator. Appending it would mean
    shipping a conflict and then overriding it — and the extra bulk pushed a
-   trivial query past a 2-minute timeout on `deepseek-v4-flash`.
+   trivial query past a 2-minute timeout on the configured flash model.
 
 pidag's own workers take the same channel: `PiPrintWorker` runs `pi` with cwd at
 the project root, so they inherit `CLAUDE.md` too, plus a small anti-loop prompt
@@ -53,7 +54,7 @@ of their own.
 
 ```
 1. Claude writes the spec           (expensive, valuable, stays with Claude)
-2. pi-workhorse.sh implement <spec> (deepseek does the work)
+2. pi-workhorse.sh implement <spec> (pi's configured model does the work)
 3. pi-workhorse.sh gate             (objective — exit code, not opinion)
 4. fail? pi-workhorse.sh repair     (continues the session, keeps context)
      still failing after 2 rounds → escalate the model, do not keep retrying
@@ -73,17 +74,24 @@ worth more than a reviewer told not to.
 - **Still read the load-bearing diff before committing.** Not the mechanical bulk
   — the parts where the spec's judgement lives. Skipping this is how a tree gets
   committed uncompiling.
-- **Demand terse replies.** The harness caps them; do not undo that.
+- **Demand terse replies.** The harness caps them; do not undo that. Prompt bulk
+  costs latency as well as tokens — an oversized system prompt timed a trivial
+  query out at two minutes.
 - Never paste a whole file back to pi. It has `read`.
 
-## Escalation
+## Model selection
 
-Default `deepseek-v4-flash`. Escalate on: two failed gate rounds, a reported
-spec defect needing judgement, or anything touching wire formats, migrations or
-concurrency. Pass the model as the third argument.
+**The harness hardcodes no model.** Omitting `--model` lets pi use whatever its
+own configuration defines — `settings.json` (`provider`, `model`) or the
+`PI_MODEL` / `PI_PROVIDER` environment. That is the default and it should stay
+the default: a model baked into the harness silently contradicts pi's config the
+moment that config changes.
 
-`pi --list-models` shows what is configured. Escalating is cheaper than three
-more rounds of a model that cannot see the problem.
+Pass a model as the **third argument** only to escalate. Escalate on: two failed
+gate rounds, a reported spec defect needing judgement, or anything touching wire
+formats, migrations or concurrency. `pi --list-models` shows what is available.
+Escalating is cheaper than three more rounds of a model that cannot see the
+problem.
 
 ## When NOT to delegate
 
