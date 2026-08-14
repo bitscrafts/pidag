@@ -35,52 +35,35 @@ DEFAULT_MODEL="${PI_MODEL:-deepseek-v4-flash}"
 MAX_ITER="${PI_MAX_TOOL_ITERATIONS:-60}"
 
 # ---------------------------------------------------------------- guardrails
-# Composed in precedence order: the global commandments first, then the
-# project overrides. The overrides come LAST and say so explicitly, because
-# commandment 1 of system.md tells the agent to git commit and this project
-# forbids any workhorse from committing at all.
-build_guardrails() {
-    local root="$1"
-    [ -f "$HOME/.pi/agent/system.md" ] && cat "$HOME/.pi/agent/system.md"
+# pi AUTO-LOADS AGENTS.md / CLAUDE.md from the working directory — verified
+# 2026-08-14: `pi -p` run bare in this repo correctly answers NO to "is a
+# workhorse ever allowed to run git commit", which is stated only in CLAUDE.md.
+# That is why `cd "$ROOT"` below is load-bearing, not tidiness: invoke from
+# anywhere else and the project rules silently do not load.
+#
+# `~/.pi/agent/system.md` is NOT auto-loaded, and is deliberately NOT appended
+# here. Its commandment 1 orders the agent to git commit before editing, which
+# this project forbids outright; its HANDOFF.md and memory-contract commandments
+# belong to the orchestrator, not to a bounded spec implementation. Appending it
+# would mean shipping a conflict and then overriding it. Cheaper and safer to
+# let CLAUDE.md be the single channel — and much shorter, which matters: a
+# bloated system prompt pushed a trivial query past a 2-minute timeout on
+# deepseek-v4-flash.
+#
+# Consequence: worker-facing rules MUST live in CLAUDE.md to take effect.
+role_preamble() {
     cat <<'GUARD'
+You are a workhorse under an orchestrator. The project's CLAUDE.md rules are
+already in your context and are binding — in particular: never git commit, never
+edit anything under specs/, never touch /projects/_upstream/.
 
-# PROJECT OVERRIDES — these WIN over anything above, including the numbered
-# Global Workflow Commandments. Where they conflict, these are correct.
+If the spec is wrong, incomplete or self-contradictory, STOP and say so in one
+line rather than coding around it. Those reports are the most valuable thing you
+produce.
 
-1. **NEVER run `git commit`, `git add`, `git stash`, `git checkout`, `git restore`
-   or `git push`.** This OVERRIDES the "Pre-modification Commits" commandment
-   above, which does not apply to you. Leave all work in the working tree. The
-   orchestrator commits, only after reading the diff. Eleven commits once had to
-   be rewritten because this was not enforced.
-2. **NEVER modify any file under `specs/`.** Specs are the contract being
-   implemented, not an artefact of the implementation. A workhorse that can edit
-   the spec can make any failure vanish by rewriting the requirement — the same
-   failure mode as editing a test to fit the code. If a spec looks wrong,
-   incomplete or self-contradictory, STOP and say so in one line. Those reports
-   are the most valuable thing you produce: five requirements in this project
-   were withdrawn or corrected because a workhorse reported a bad premise
-   instead of coding around it.
-3. **NEVER touch `/projects/_upstream/`.** Read-only reference checkout on the
-   user's own fork and active branch.
-4. **NEVER `rm -rf` a `.pidag/` directory.** It is the only record of a run.
-   Move it aside: `mv .pidag .pidag.prev-$(date +%H%M%S)`.
-5. **Never regenerate a pinned test fixture**, and never run an `#[ignore]`d
-   generator with `--ignored`. A fixture the suite can regenerate is not a
-   fixture.
-6. **Test artefacts go in `_tmp/`**, never `/tmp/`. Use paths relative to the
-   project root or `env!("CARGO_MANIFEST_DIR")` — never a hardcoded absolute
-   path, which breaks CI on a fresh checkout.
-7. **Report raw output; never state a summed total.** Paste every
-   `^test result:` line verbatim. The orchestrator does the arithmetic.
-8. **Be terse.** Your reply is read by an orchestrator paying per token. No
-   preamble, no restating the task, no narrating what you are about to do.
-   Report: what changed, the gate result, and anything you found wrong.
+Be terse. Your reply is read by an orchestrator paying per token: no preamble,
+no restating the task, no narrating what you are about to do.
 GUARD
-    if [ -f "$root/CLAUDE.md" ]; then
-        echo
-        echo "# PROJECT RULES (from $root/CLAUDE.md)"
-        cat "$root/CLAUDE.md"
-    fi
 }
 
 # ------------------------------------------------------------------ helpers
@@ -150,12 +133,17 @@ serious first. Say FAIL if any requirement is unimplemented or any test was weak
         ;;
     esac
 
+    # cd is load-bearing: pi auto-loads CLAUDE.md from the working directory,
+    # and that is the entire guardrail channel. Invoked from elsewhere, the
+    # project rules silently do not reach the model.
+    cd "$ROOT" || { echo "cannot cd to $ROOT" >&2; exit 2; }
+
     exec "$PI" -p $CONT \
         --session-dir "$SD" \
         --model "$MODEL" \
         --tools "$TOOLS" \
         --max-tool-iterations "$MAX_ITER" \
-        --append-system-prompt "$(build_guardrails "$ROOT")" \
+        --append-system-prompt "$(role_preamble)" \
         "$TASK"
     ;;
 

@@ -21,20 +21,33 @@ on Claude subagents for work `pi` could have done.
 
 They are separate files for separate readers. Do not merge them.
 
-## The one thing that will silently break
+## How guardrails actually reach pi
 
-**Invoking `pi` from a non-interactive shell does not apply the user's shell
-alias**, so `~/.pi/agent/system.md` is absent and pi runs with **no operating
-rules whatsoever**. Verified 2026-08-14: the bare binary answers NO to "must you
-update HANDOFF.md"; the same call with `--append-system-prompt` answers YES.
+**pi auto-loads `AGENTS.md` / `CLAUDE.md` from its working directory.** It does
+**not** auto-load `~/.pi/agent/system.md` — that arrives only through the user's
+interactive shell alias, which does not expand in a non-interactive shell.
 
-Never call `pi` directly for real work. Always go through
-`deploy/scripts/pi-workhorse.sh`, which composes the guardrails explicitly.
+Verified 2026-08-14, both directions: `pi -p` run bare in this repo answers NO to
+"is a workhorse ever allowed to run git commit" (stated only in `CLAUDE.md`),
+while the same binary answers NO to "must you update HANDOFF.md" until
+`--append-system-prompt` is passed explicitly.
 
-Second trap: `system.md` commandment 1 instructs the agent to **git commit before
-modifying files**, which violates this project's *no workhorse may ever commit*
-rule. The harness appends project overrides **after** the commandments and marks
-them as winning. If you compose a prompt by hand, you must do the same.
+Three consequences, and they are the whole design:
+
+1. **`CLAUDE.md` is the guardrail channel.** Worker-facing rules must live there
+   to take effect. This is why the project's hard rules belong in the main Claude
+   file rather than in a spec or a wrapper.
+2. **Working directory is load-bearing.** The harness `cd`s to the project root
+   before invoking. Run pi from anywhere else and the rules silently vanish.
+3. **`system.md` is deliberately not appended.** Its commandment 1 orders a git
+   commit before editing, which this project forbids outright; its HANDOFF.md and
+   memory commandments belong to the orchestrator. Appending it would mean
+   shipping a conflict and then overriding it — and the extra bulk pushed a
+   trivial query past a 2-minute timeout on `deepseek-v4-flash`.
+
+pidag's own workers take the same channel: `PiPrintWorker` runs `pi` with cwd at
+the project root, so they inherit `CLAUDE.md` too, plus a small anti-loop prompt
+of their own.
 
 ## The loop
 
